@@ -14,7 +14,7 @@ def load_budget(file_path):
     except FileNotFoundError:
         print(f"Error: The file at {file_path} was not found.")
         return None
-
+    
 
 # Prepare data for Sankey chart
 def prepare_sankey_data(df):
@@ -52,26 +52,26 @@ def prepare_sankey_data(df):
         }
     }
 
-def update_budget(df, subcategory, new_amount):
-    df.loc[df['Subcategory'] == subcategory, 'Amount'] = new_amount
-    return df
-
-# Save the updated DataFrame back to the CSV
-def save_budget(df, file_path):
-    df.to_csv(file_path, index=False)
-    print(f"Data saved to {file_path}")
+# Update the budget data and save to CSV
+def update_and_save_budget(data, file_path):
+    try:
+        budget_df = pd.DataFrame(data)
+        print('doing function')
+        print(budget_df)
+        # Validate data
+        if not all(col in budget_df.columns for col in ["Category", "Subcategory", "Amount", "Bank Account"]):
+            raise ValueError("Invalid data format")
+        budget_df.to_csv(file_path, index=False)
+        print(f"Data saved to {file_path}")
+    except Exception as e:
+        print(f"Error updating budget: {e}")
+    return budget_df
 
 # Test the function
 if __name__ == "__main__":
     file_path = '.\\data\\budget.csv'
-    budget = load_budget(file_path)
-    sankey_data = prepare_sankey_data(budget)
-    print(sankey_data)
-    print('\n')
-
-    # Update the budget for "Rent"
-    budget = update_budget(budget, 'Rent', 1600)
-    print(budget)
+    # budget = load_budget(file_path)
+    # sankey_data = prepare_sankey_data(budget)
 
     # Save the updated data
-    save_budget(budget, file_path)
+    # save_budget(budget, file_path)
