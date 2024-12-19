@@ -1,7 +1,7 @@
 Category,Subcategory,Amount,Bank Account
-Income,Salary,400,Main Account
-Income,Freelance,20,Secondary Account
-Expenses,Rent,1500,Main Account
-Expenses,Groceries,400,Main Account
-Savings,Emergency Fund,1000,Savings Account
-Savings,Retirement Fund,800,Retirement Account
+Income1,Local,400,Main Account
+Income1,Rent,20,Secondary Account
+Income1,Trips,1500,Main Account
+Income1,General,400,Main Account
+Income2,Mortgage,2000,Savings Account
+Savings,Pest Control,69,Retirement Account
