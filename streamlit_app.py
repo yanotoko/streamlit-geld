@@ -4,25 +4,25 @@ import plotly.graph_objects as go
 import io
 
 st.set_page_config(page_title="Budget App", layout="wide")
-st.title("Budget Visualization App")
+st.title("Budget App")
 
 # --------------------------
 # Helpers
 # --------------------------
 SAMPLE_CSV = """Category,Subcategory,Bank Account,Amount
-Income 1,Internet/Phone/Insurance,Bank3,250
-Income 1,Travel,Bank1,413
-Income 1,Spending,Bank1,900
-Income 1,Student Loans,Bank2,82.7
-Income 1,Personal,Bank2,167.31
-Income 1,Saving Das,Bank1,200
-Income 1,Rent,Bank1,1300
-Income 1,Extra,Bank1,450
-Income 2,Mortgage,Bank2,1726.29
-Income 2,PM,Bank2,225
-Income 2,Pest control,Bank2,69
-Income 2,house Repairs,Bank2,199.71
-Income 2,Lawn,Bank2,225
+Income 1,Utilities,Bank3,100
+Income 1,Travel,Bank1,100
+Income 1,Spending,Bank1,100
+Income 1,Loans,Bank2,100
+Income 1,Personal,Bank2,100
+Income 1,Saving 1,Bank1,100
+Income 1,Rent,Bank1,100
+Income 1,Extra,Bank1,100
+Income 2,Mortgage,Bank2,100
+Income 2,Saving 2,Bank2,100
+Income 2,Saving 3,Bank2,100
+Income 2,Saving 4,Bank2,100
+Income 2,Saving 5,Bank2,100
 """
 
 def read_csv_any(file_or_buffer, **kwargs):
