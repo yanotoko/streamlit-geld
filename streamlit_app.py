@@ -9,7 +9,7 @@ st.title("Budget App")
 # --------------------------
 # Helpers
 # --------------------------
-SAMPLE_CSV = """Category,Subcategory,Bank Account,Amount
+SAMPLE_CSV = """Income,Category,Bank Account,Amount
 Income 1,Utilities,Bank3,100
 Income 1,Travel,Bank1,100
 Income 2,Saving 4,Bank2,100
@@ -161,7 +161,7 @@ with col_b:
 # --------------------------
 # Build & Render Sankey
 # --------------------------
-st.subheader("Sankey Chart (3 levels)")
+st.subheader("Chart")
 try:
     sankey_data = prepare_sankey_data(df_in, l1=l1, l2=l2, l3=l3, value_col=val_col)
     render_sankey(sankey_data, title=f"{l1} → {l2} → {l3}")
