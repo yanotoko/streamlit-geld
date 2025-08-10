@@ -1,52 +1,80 @@
-from flask import Flask, render_template_string, request
-from app.utils import load_budget, prepare_sankey_data, update_and_save_budget
-import plotly.graph_objects as go
+import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
+import os
 
-# Create the Flask application instance
-app = Flask(__name__)
+DATA_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'budget.csv')
 
-# Define a simple route with a button to access the budget
-@app.route('/')
-def home():
-    return render_template_string('''
-    <html>
-    <head>
-        <title>Home</title>
-        <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
-        <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Welcome to the Budget Visualization App!</h1>
-            <a href="/budget" class="btn btn-primary">View Budget and Sankey Chart</a>
-        </div>
-    </body>
-    </html>
-    ''')
+st.set_page_config(page_title="Budget Visualization App", layout="wide")
 
-# Define a route to display the budget dataframe and Sankey chart
-@app.route('/budget', methods=['GET', 'POST'])
-def display_budget_and_sankey():
-    budget_df = None
-    if request.method == 'POST':
-        # Update the budget data using the utility function
-        data = request.json
-        if not data:
-            return{"error": "No data received"}, 400
-        update_and_save_budget(data, '.\\data\\budget.csv')
-        return {"success":True},200
+st.title("Budget Visualization App")
 
-    # Load the budget dataframe
-    budget_df = load_budget('.\\data\\budget.csv')
-    
-    # Convert the dataframe to an editable HTML table
-    budget_html = budget_df.to_html(classes='table table-striped', index=False, border=0, table_id='budgetTable')
-    
-    # Prepare the data for the Sankey chart
-    sankey_data = prepare_sankey_data(budget_df)
-    
-    # Create the Sankey chart
+# Load budget data
+@st.cache_data
+def load_budget(path):
+    return pd.read_csv(path)
+
+def save_budget(df, path):
+    df.to_csv(path, index=False)
+
+def prepare_sankey_data(df):
+    # Example: assumes columns 'Category', 'Subcategory', 'Amount'
+    nodes = list(pd.unique(df['Category'].tolist() + df['Subcategory'].tolist()))
+    node_indices = {name: i for i, name in enumerate(nodes)}
+    sources = df['Category'].map(node_indices)
+    targets = df['Subcategory'].map(node_indices)
+    values = df['Amount']
+    return {
+        "nodes": nodes,
+        "sources": sources,
+        "targets": targets,
+        "values": values
+    }
+
+# Load data
+if not os.path.exists(DATA_PATH):
+    st.error(f"Data file not found at {DATA_PATH}")
+    st.stop()
+
+df = load_budget(DATA_PATH)
+
+st.subheader("Budget Table (Editable)")
+
+edited_df = st.data_editor(
+    df,
+    num_rows="dynamic",
+    use_container_width=True,
+    key="budget_editor"
+)
+
+if st.button("Save Changes"):
+    save_budget(edited_df, DATA_PATH)
+    st.success("Changes saved to CSV.")
+
+# Add new row functionality
+st.markdown("### Add New Row")
+with st.form("add_row_form", clear_on_submit=True):
+    col1, col2, col3, col4 = st.columns(4)
+    new_category = col1.text_input("Category")
+    new_subcategory = col2.text_input("Subcategory")
+    new_amount = col3.number_input("Amount", value=0.0, step=0.01)
+    new_account = col4.text_input("Bank Account")
+    submitted = st.form_submit_button("Add Row")
+    if submitted:
+        new_row = {
+            "Category": new_category,
+            "Subcategory": new_subcategory,
+            "Amount": new_amount,
+            "Bank Account": new_account
+        }
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        save_budget(df, DATA_PATH)
+        st.success("New row added. Please refresh the page to see the update.")
+
+# Sankey chart
+st.subheader("Sankey Chart")
+try:
+    sankey_data = prepare_sankey_data(df)
     fig = go.Figure(data=[go.Sankey(
         node=dict(
             pad=15,
@@ -55,99 +83,11 @@ def display_budget_and_sankey():
             label=sankey_data['nodes']
         ),
         link=dict(
-            source=sankey_data['links']['source'],
-            target=sankey_data['links']['target'],
-            value=sankey_data['links']['value']
+            source=sankey_data['sources'],
+            target=sankey_data['targets'],
+            value=sankey_data['values']
         )
     )])
-    
-    # Convert the chart to HTML
-    sankey_html = fig.to_html(full_html=False)
-    
-    # Render the budget table and Sankey chart
-    return render_template_string('''
-    <html>
-    <head>
-        <title>Budget and Sankey Chart</title>
-        <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
-        <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
-        <script>
-            $(document).ready(function() {
-                // Make table cells editable
-                $('#budgetTable').on('click', 'td', function() {
-                    var $cell = $(this);
-                    if (!$cell.hasClass('editing')) {
-                        $cell.addClass('editing');
-                        var originalContent = $cell.text();
-                        $cell.html('<input type="text" value="' + originalContent + '" />');
-                        $cell.find('input').focus().blur(function() {
-                            var newContent = $(this).val();
-                            $cell.removeClass('editing').text(newContent);
-                        });
-                    }
-                });
-
-                // Add Row functionality
-                $('#addRowButton').click(function() {
-                    // Get the number of columns from the first row
-                    var colCount = $('#budgetTable thead th').length || $('#budgetTable tr:first td').length;
-                    var newRow = '<tr>';
-                    for (var i = 0; i < colCount; i++) {
-                        newRow += '<td></td>';
-                    }
-                    newRow += '</tr>';
-                    $('#budgetTable tbody').append(newRow);
-                });
-
-                // Save updated data
-                $('#saveButton').click(function() {
-                    var tableData = []; // Declare the variable inside the click event
-                        $('#budgetTable tr').each(function (row, tr) {
-                            var rowData = {
-                                "Category": $(tr).find('td:eq(0)').text().trim(),
-                                "Subcategory": $(tr).find('td:eq(1)').text().trim(),
-                                "Amount": $(tr).find('td:eq(2)').text().trim(),
-                                "Bank Account": $(tr).find('td:eq(3)').text().trim()
-                            };
-                            // Add only valid rows
-                            if (rowData.Category && rowData.Subcategory && rowData.Amount) {
-                                tableData.push(rowData);
-                            }
-                        });
-
-                        //console.log("Table Data to Send:", tableData); // Debugging to confirm data is collected
-
-                    $.ajax({
-                        url: '/budget',
-                        type: 'POST',
-                        contentType: 'application/json',
-                        data: JSON.stringify(tableData),
-                        success: function(response) {
-                            alert('Data saved successfully!');
-                            location.reload();
-                        },
-                        error: function(xhr, status, error) {
-                            alert('Error saving data: ' + xhr.responseJSON.error);
-                        }
-                    });
-                });
-            });
-        </script>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Budget Data and Sankey Chart</h1>
-            <h2>Budget Table</h2>
-            <button id="addRowButton" class="btn btn-secondary mb-2">Add Row</button>
-            {{ budget_html|safe }}
-            <button id="saveButton" class="btn btn-success">Save</button>
-            <h2>Sankey Chart</h2>
-            {{ sankey_html|safe }}
-        </div>
-    </body>
-    </html>
-    ''', budget_html=budget_html, sankey_html=sankey_html)
-
-# Run the application
-if __name__ == "__main__":
-    app.run(debug=True)
+    st.plotly_chart(fig, use_container_width=True)
+except Exception as e:
+    st.warning(f"Could not render Sankey chart: {e}")
