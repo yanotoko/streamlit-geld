@@ -87,6 +87,18 @@ def display_budget_and_sankey():
                     }
                 });
 
+                // Add Row functionality
+                $('#addRowButton').click(function() {
+                    // Get the number of columns from the first row
+                    var colCount = $('#budgetTable thead th').length || $('#budgetTable tr:first td').length;
+                    var newRow = '<tr>';
+                    for (var i = 0; i < colCount; i++) {
+                        newRow += '<td></td>';
+                    }
+                    newRow += '</tr>';
+                    $('#budgetTable tbody').append(newRow);
+                });
+
                 // Save updated data
                 $('#saveButton').click(function() {
                     var tableData = []; // Declare the variable inside the click event
@@ -126,6 +138,7 @@ def display_budget_and_sankey():
         <div class="container">
             <h1>Budget Data and Sankey Chart</h1>
             <h2>Budget Table</h2>
+            <button id="addRowButton" class="btn btn-secondary mb-2">Add Row</button>
             {{ budget_html|safe }}
             <button id="saveButton" class="btn btn-success">Save</button>
             <h2>Sankey Chart</h2>

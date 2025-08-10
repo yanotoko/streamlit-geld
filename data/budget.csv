@@ -1,7 +1,14 @@
 Category,Subcategory,Amount,Bank Account
-AP $,Local,300,Main Account
-AP $,Rent,20,Secondary Account
-AP $,Trips,1500,Main Account
-AP $,General,400,Main Account
-FC $,Mortgage,2000,Savings Account
-Savings,Pest Control,69,Retirement Account
+AP $,Internet/Phone/Insurance,250.00,N26
+AP $,Travel,413.00,NFCU
+AP $,Spending,900.00,NFCU
+AP $,Student Loans,82.70,Cap
+AP $,Personal,167.31,Cap
+AP $,Saving Das,200.00,NFCU
+AP $,Rent,1300.00,NFCU
+AP $,Extra,450.00,NFCU
+House,Mortgage,1726.29,Cap
+House,PM,225.00,Cap
+House,Pest control,69.00,Cap
+House,House Repairs,199.71,Cap
+House,Lawn,225.00,Cap
