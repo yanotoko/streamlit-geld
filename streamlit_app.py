@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import io
 
-st.set_page_config(page_title="Budget Visualization App", layout="wide")
+st.set_page_config(page_title="Budget App", layout="wide")
 st.title("Budget Visualization App")
 
 # --------------------------
