@@ -12,15 +12,6 @@ st.title("Budget App")
 SAMPLE_CSV = """Category,Subcategory,Bank Account,Amount
 Income 1,Utilities,Bank3,100
 Income 1,Travel,Bank1,100
-Income 1,Spending,Bank1,100
-Income 1,Loans,Bank2,100
-Income 1,Personal,Bank2,100
-Income 1,Saving 1,Bank1,100
-Income 1,Rent,Bank1,100
-Income 1,Extra,Bank1,100
-Income 2,Mortgage,Bank2,100
-Income 2,Saving 2,Bank2,100
-Income 2,Saving 3,Bank2,100
 Income 2,Saving 4,Bank2,100
 Income 2,Saving 5,Bank2,100
 """
