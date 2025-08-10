@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import os
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'budget.csv')
+DATA_PATH = os.path.join(os.path.dirname(__file__), 'data', 'budget.csv')
 
 st.set_page_config(page_title="Budget Visualization App", layout="wide")
 
@@ -18,18 +18,38 @@ def save_budget(df, path):
     df.to_csv(path, index=False)
 
 def prepare_sankey_data(df):
-    # Example: assumes columns 'Category', 'Subcategory', 'Amount'
-    nodes = list(pd.unique(df['Category'].tolist() + df['Subcategory'].tolist()))
-    node_indices = {name: i for i, name in enumerate(nodes)}
-    sources = df['Category'].map(node_indices)
-    targets = df['Subcategory'].map(node_indices)
-    values = df['Amount']
+    # Aggregate Category → Subcategory
+    g12 = df.groupby(["Category", "Subcategory"], as_index=False)["Amount"].sum()
+    # Aggregate Subcategory → Bank Account
+    g23 = df.groupby(["Subcategory", "Bank Account"], as_index=False)["Amount"].sum()
+
+    # Build node list
+    nodes = list(pd.unique(df["Category"])) \
+          + [n for n in pd.unique(df["Subcategory"]) if n not in df["Category"].unique()] \
+          + [n for n in pd.unique(df["Bank Account"]) if n not in df["Category"].unique() and n not in df["Subcategory"].unique()]
+    node_index = {name: i for i, name in enumerate(nodes)}
+
+    # Links: L1→L2
+    src_12 = g12["Category"].map(node_index)
+    tgt_12 = g12["Subcategory"].map(node_index)
+    val_12 = g12["Amount"]
+
+    # Links: L2→L3
+    src_23 = g23["Subcategory"].map(node_index)
+    tgt_23 = g23["Bank Account"].map(node_index)
+    val_23 = g23["Amount"]
+
+    sources = pd.concat([src_12, src_23])
+    targets = pd.concat([tgt_12, tgt_23])
+    values  = pd.concat([val_12, val_23])
+
     return {
         "nodes": nodes,
         "sources": sources,
         "targets": targets,
         "values": values
     }
+
 
 # Load data
 if not os.path.exists(DATA_PATH):
