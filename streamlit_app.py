@@ -2,7 +2,9 @@
 import io
 import pandas as pd
 import streamlit as st
+from streamlit_echarts import st_echarts, JsCode
 
+from utils.echarts import make_echarts_sankey_options
 from utils.io import read_csv_any, read_table_any, get_excel_sheets, validate_upload
 from utils.sankey import prepare_sankey_data, make_sankey_figure
 from utils.constants import SAMPLE_CSV, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB
@@ -78,6 +80,23 @@ st.caption(f"Source: **{source_name}**")
 st.dataframe(df_raw.head(50), use_container_width=True)
 
 # --------------------------
+# Chart style select
+# --------------------------
+
+st.sidebar.header("3) Visualization")
+chart_type = st.sidebar.selectbox(
+    "Choose a chart",
+    ["Sankey (Plotly)", "Sankey (ECharts, labels always on)"],
+    index=0
+)
+
+# Optional ECharts-only knobs
+if chart_type == "Sankey (ECharts, labels always on)":
+    ech_curveness = st.sidebar.slider("ECharts link curveness", 0.0, 1.0, 0.5, 0.05)
+    ech_edge_font = st.sidebar.number_input("Edge label font size", 8, 24, 11, 1)
+
+
+# --------------------------
 # Editable table
 # --------------------------
 st.subheader("Edit Data")
@@ -106,7 +125,36 @@ with col_b:
 st.subheader("Income flow")
 try:
     sankey_data = prepare_sankey_data(df_in, l1=l1, l2=l2, l3=l3, value_col=val_col)
-    fig = make_sankey_figure(sankey_data, title=f"{l1} → {l2} → {l3}")
-    st.plotly_chart(fig, use_container_width=True)
+
+    if chart_type == "Sankey (Plotly)":
+        fig = make_sankey_figure(
+            sankey_data,
+            title=f"{l1} → {l2} → {l3}"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    elif chart_type == "Sankey (ECharts, labels always on)":
+        options = make_echarts_sankey_options(
+            sankey_data,
+            title=f"{l1} → {l2} → {l3}",
+            value_suffix=" €",        # optional
+            curveness=ech_curveness,
+            edge_font_size=int(ech_edge_font),
+            py_value_format=",.0f",   # ",.2f" for cents, etc.
+        )
+        st_echarts(options=options, height="600px")
+
+    else:
+        st.warning(f"Unsupported chart type: {chart_type}")
+
 except Exception as e:
-    st.error(f"Could not render Sankey chart: {e}")
+    st.error(f"Could not render chart: {e}")
+
+
+# st.subheader("Income flow")
+# try:
+#     sankey_data = prepare_sankey_data(df_in, l1=l1, l2=l2, l3=l3, value_col=val_col)
+#     fig = make_sankey_figure(sankey_data, title=f"{l1} → {l2} → {l3}")
+#     st.plotly_chart(fig, use_container_width=True)
+# except Exception as e:
+#     st.error(f"Could not render Sankey chart: {e}")
