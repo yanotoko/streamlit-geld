@@ -87,7 +87,7 @@ st.sidebar.header("3) Visualization")
 chart_type = st.sidebar.selectbox(
     "Choose a chart",
     ["Sankey (Plotly)", "Sankey (ECharts, labels always on)"],
-    index=0
+    index=1
 )
 
 # Optional ECharts-only knobs
@@ -137,7 +137,7 @@ try:
         options = make_echarts_sankey_options(
             sankey_data,
             title=f"{l1} → {l2} → {l3}",
-            value_suffix=" €",        # optional
+            value_suffix=" $",        # optional
             curveness=ech_curveness,
             edge_font_size=int(ech_edge_font),
             py_value_format=",.0f",   # ",.2f" for cents, etc.

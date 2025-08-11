@@ -5,7 +5,7 @@ from typing import Dict, List
 def make_echarts_sankey_options(
     sankey_data: Dict[str, List],
     title: str,
-    value_suffix: str = "",
+    value_suffix: str = " $",
     curveness: float = 0.5,
     edge_font_size: int = 11,
     py_value_format: str = ",.0f",   # Python-side number formatting
