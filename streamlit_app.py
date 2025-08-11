@@ -1,21 +1,24 @@
+# app/streamlit_app.py (imports)
 import io
 import pandas as pd
 import streamlit as st
 
-from utils.io import read_csv_any
+from utils.io import read_csv_any, read_table_any, get_excel_sheets, validate_upload
 from utils.sankey import prepare_sankey_data, make_sankey_figure
-from utils.constants import SAMPLE_CSV
+from utils.constants import SAMPLE_CSV, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB
+
 
 st.set_page_config(page_title="Budget App", layout="wide")
 st.title("Budget App")
 
-# --------------------------
-# Sidebar: Upload + Options
-# --------------------------
-st.sidebar.header("1) Upload CSV")
-uploaded = st.sidebar.file_uploader("Choose a CSV file", type=["csv"])
+# --- Sidebar: Upload + Options ---
+st.sidebar.header("1) Upload file")
+uploaded = st.sidebar.file_uploader(
+    "Choose a CSV or Excel file",
+    type=[ext.lstrip(".") for ext in ALLOWED_EXTS]
+)
+st.sidebar.caption(f"Allowed: CSV, XLSX/XLS/XLSM • Max size: {MAX_UPLOAD_MB} MB")
 
-st.sidebar.caption("No file? Download a sample to try:")
 st.sidebar.download_button(
     "Download sample.csv",
     data=SAMPLE_CSV,
@@ -26,12 +29,29 @@ st.sidebar.download_button(
 
 # Load data (uploaded or sample)
 if uploaded is not None:
-    df_raw = read_csv_any(uploaded)
+    ok, msg = validate_upload(
+        uploaded,
+        allowed_exts=ALLOWED_EXTS,
+        allowed_mime=ALLOWED_MIME,
+        max_bytes=MAX_UPLOAD_MB * 1024 * 1024,
+    )
+    if not ok:
+        st.error(msg)
+        st.stop()  # prevent fallback to sample; force user to upload a valid file
+
     source_name = uploaded.name
+    ext = source_name.split(".")[-1].lower()
+    if ext in {"xlsx", "xls", "xlsm"}:
+        sheets = get_excel_sheets(uploaded)
+        sheet = st.sidebar.selectbox("Sheet", sheets, index=0)
+        df_raw = read_table_any(uploaded, sheet_name=sheet)
+    else:
+        df_raw = read_table_any(uploaded)
 else:
     st.info("No file uploaded. Using the built-in **sample dataset**.")
     df_raw = read_csv_any(io.StringIO(SAMPLE_CSV))
     source_name = "sample.csv"
+
 
 # --------------------------
 # Column Mapping
