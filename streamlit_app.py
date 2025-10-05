@@ -44,44 +44,95 @@ st.sidebar.download_button(
     use_container_width=True
 )
 
-# 3c — Load order: Workspace → Uploaded → Sample
+# 3c — Load order with seeding/import support
 df_raw = None
 source_name = ""
+df_uploaded = None
 
 ws_id = st.session_state.get("workspace_id", "").strip()
+ws_tab = sanitize_workspace_id(ws_id) if ws_id else ""
+ws_loaded = False
+ws_empty = True
+
+# Try to read workspace (but don't lock in as df_raw yet)
 if ws_id:
     try:
         df_ws, meta = read_workspace(ws_id, DEFAULT_HEADERS)
-        df_raw = df_ws
-        source_name = f"Google Sheets (tab: {sanitize_workspace_id(ws_id)})"
+        ws_loaded = True
+        ws_empty = df_ws.dropna(how="all").shape[0] == 0
         st.session_state["ws_version"] = int(meta.get("version", 0))
     except Exception as e:
         st.error(f"Could not load workspace '{ws_id}': {e}")
 
-if df_raw is None:
-    if uploaded is not None:
-        ok, msg = validate_upload(
-            uploaded,
-            allowed_exts=ALLOWED_EXTS,
-            allowed_mime=ALLOWED_MIME,
-            max_bytes=MAX_UPLOAD_MB * 1024 * 1024,
-        )
-        if not ok:
-            st.error(msg)
-            st.stop()
+# Parse uploaded file regardless of workspace state
+if uploaded is not None:
+    ok, msg = validate_upload(
+        uploaded,
+        allowed_exts=ALLOWED_EXTS,
+        allowed_mime=ALLOWED_MIME,
+        max_bytes=MAX_UPLOAD_MB * 1024 * 1024,
+    )
+    if not ok:
+        st.error(msg)
+        st.stop()
 
-        source_name = uploaded.name
-        ext = source_name.split(".")[-1].lower()
-        if ext in {"xlsx", "xls", "xlsm"}:
-            sheets = get_excel_sheets(uploaded)
-            sheet = st.sidebar.selectbox("Sheet", sheets, index=0)
-            df_raw = read_table_any(uploaded, sheet_name=sheet)
-        else:
-            df_raw = read_table_any(uploaded)
+    upload_name = uploaded.name
+    ext = upload_name.split(".")[-1].lower()
+    if ext in {"xlsx", "xls", "xlsm"}:
+        sheets = get_excel_sheets(uploaded)
+        sheet = st.sidebar.selectbox("Sheet", sheets, index=0)
+        df_uploaded = read_table_any(uploaded, sheet_name=sheet)
     else:
-        st.info("No file or workspace data found. Using the built-in **sample dataset**.")
-        df_raw = read_csv_any(io.StringIO(SAMPLE_CSV))
-        source_name = "sample.csv"
+        df_uploaded = read_table_any(uploaded)
+
+# Decide what to show/edit
+if ws_loaded and not ws_empty:
+    df_raw = df_ws
+    source_name = f"Google Sheets (tab: {ws_tab})"
+elif df_uploaded is not None:
+    df_raw = df_uploaded
+    source_name = upload_name
+else:
+    st.info("No workspace data or upload found. Using the built-in **sample dataset**.")
+    df_raw = read_csv_any(io.StringIO(SAMPLE_CSV))
+    source_name = "sample.csv"
+
+# If both exist (non-empty workspace AND an upload), let user pick
+if ws_loaded and not ws_empty and df_uploaded is not None:
+    choice = st.sidebar.radio("Use data from", ("Workspace", "Uploaded file"), index=0)
+    if choice == "Uploaded file":
+        df_raw = df_uploaded
+        source_name = upload_name
+
+# 3e — Import uploaded file into the selected workspace
+if ws_id and df_uploaded is not None:
+    st.sidebar.markdown("---")
+    if st.sidebar.button("Import uploaded → Workspace", use_container_width=True):
+        try:
+            expected = None if ws_empty else st.session_state.get("ws_version", 0)
+            new_version = write_workspace(ws_id, df_uploaded, expected_version=expected)
+            st.session_state["ws_version"] = new_version
+            st.sidebar.success(f"Imported into '{ws_id}' (version {new_version}).")
+            st.rerun()
+        except VersionConflict as vc:
+            st.sidebar.warning(str(vc))
+            col_imp1, col_imp2 = st.sidebar.columns(2)
+            with col_imp1:
+                if st.button("Reload workspace"):
+                    df_ws, meta = read_workspace(ws_id, DEFAULT_HEADERS)
+                    st.session_state["ws_version"] = int(meta.get("version", 0))
+                    st.rerun()
+            with col_imp2:
+                if st.button("Force overwrite"):
+                    try:
+                        new_version = write_workspace(ws_id, df_uploaded, expected_version=None)
+                        st.session_state["ws_version"] = new_version
+                        st.sidebar.success(f"Overwrote '{ws_id}' (version {new_version}).")
+                        st.rerun()
+                    except Exception as e:
+                        st.sidebar.error(f"Overwrite failed: {e}")
+        except Exception as e:
+            st.sidebar.error(f"Import failed: {e}")
 
 
 # --------------------------
@@ -173,7 +224,7 @@ if save_btn and can_save:
             if st.button("Reload from Sheets"):
                 df_ws, meta = read_workspace(ws_id, DEFAULT_HEADERS)
                 st.session_state["ws_version"] = int(meta.get("version", 0))
-                st.experimental_rerun()
+                st.rerun()
         with c2:
             if st.button("Overwrite anyway"):
                 try:
