@@ -7,6 +7,8 @@ Income 2,Saving 4,Bank2,100
 Income 2,Saving 5,Bank2,100
 """
 
+DEFAULT_HEADERS = ["Income", "Category", "Bank Account", "Amount"]
+
 # Upload hardening
 MAX_UPLOAD_MB = 10  # change if you like
 ALLOWED_EXTS = {".csv", ".xlsx", ".xls", ".xlsm"}

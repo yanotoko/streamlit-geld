@@ -2,18 +2,33 @@
 import io
 import pandas as pd
 import streamlit as st
-from streamlit_echarts import st_echarts, JsCode
+from streamlit_echarts import st_echarts
 
 from utils.echarts import make_echarts_sankey_options
 from utils.io import read_csv_any, read_table_any, get_excel_sheets, validate_upload
 from utils.sankey import prepare_sankey_data, make_sankey_figure
-from utils.constants import SAMPLE_CSV, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB
+from utils.constants import SAMPLE_CSV, DEFAULT_HEADERS, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB
+from utils.sheets import read_workspace, write_workspace, sanitize_workspace_id, VersionConflict
 
 
 st.set_page_config(page_title="Budget App", layout="wide")
 st.title("Budget App")
 
 # --- Sidebar: Upload + Options ---
+# --- Sidebar: Workspace (public app uses Workspace ID) ---
+st.sidebar.header("0) Workspace")
+ws_input = st.sidebar.text_input("Workspace ID", value=st.session_state.get("workspace_id", ""))
+col_ws1, col_ws2 = st.sidebar.columns([1, 1])
+with col_ws1:
+    load_ws = st.button("Load workspace", use_container_width=True)
+with col_ws2:
+    # optional UX: create if missing (load does this anyway); kept for clarity
+    create_ws = st.button("Create if missing", use_container_width=True)
+
+if load_ws or create_ws:
+    st.session_state["workspace_id"] = ws_input.strip()
+
+
 st.sidebar.header("1) Upload file")
 uploaded = st.sidebar.file_uploader(
     "Choose a CSV or Excel file",
@@ -29,30 +44,44 @@ st.sidebar.download_button(
     use_container_width=True
 )
 
-# Load data (uploaded or sample)
-if uploaded is not None:
-    ok, msg = validate_upload(
-        uploaded,
-        allowed_exts=ALLOWED_EXTS,
-        allowed_mime=ALLOWED_MIME,
-        max_bytes=MAX_UPLOAD_MB * 1024 * 1024,
-    )
-    if not ok:
-        st.error(msg)
-        st.stop()  # prevent fallback to sample; force user to upload a valid file
+# 3c — Load order: Workspace → Uploaded → Sample
+df_raw = None
+source_name = ""
 
-    source_name = uploaded.name
-    ext = source_name.split(".")[-1].lower()
-    if ext in {"xlsx", "xls", "xlsm"}:
-        sheets = get_excel_sheets(uploaded)
-        sheet = st.sidebar.selectbox("Sheet", sheets, index=0)
-        df_raw = read_table_any(uploaded, sheet_name=sheet)
+ws_id = st.session_state.get("workspace_id", "").strip()
+if ws_id:
+    try:
+        df_ws, meta = read_workspace(ws_id, DEFAULT_HEADERS)
+        df_raw = df_ws
+        source_name = f"Google Sheets (tab: {sanitize_workspace_id(ws_id)})"
+        st.session_state["ws_version"] = int(meta.get("version", 0))
+    except Exception as e:
+        st.error(f"Could not load workspace '{ws_id}': {e}")
+
+if df_raw is None:
+    if uploaded is not None:
+        ok, msg = validate_upload(
+            uploaded,
+            allowed_exts=ALLOWED_EXTS,
+            allowed_mime=ALLOWED_MIME,
+            max_bytes=MAX_UPLOAD_MB * 1024 * 1024,
+        )
+        if not ok:
+            st.error(msg)
+            st.stop()
+
+        source_name = uploaded.name
+        ext = source_name.split(".")[-1].lower()
+        if ext in {"xlsx", "xls", "xlsm"}:
+            sheets = get_excel_sheets(uploaded)
+            sheet = st.sidebar.selectbox("Sheet", sheets, index=0)
+            df_raw = read_table_any(uploaded, sheet_name=sheet)
+        else:
+            df_raw = read_table_any(uploaded)
     else:
-        df_raw = read_table_any(uploaded)
-else:
-    st.info("No file uploaded. Using the built-in **sample dataset**.")
-    df_raw = read_csv_any(io.StringIO(SAMPLE_CSV))
-    source_name = "sample.csv"
+        st.info("No file or workspace data found. Using the built-in **sample dataset**.")
+        df_raw = read_csv_any(io.StringIO(SAMPLE_CSV))
+        source_name = "sample.csv"
 
 
 # --------------------------
@@ -118,6 +147,44 @@ with col_a:
 with col_b:
     csv_bytes = edited_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download Edited CSV", csv_bytes, "edited_data.csv", "text/csv", use_container_width=True)
+
+# 3d — Save to Google Sheets workspace
+st.divider()
+save_col1, save_col2 = st.columns([1, 3])
+with save_col1:
+    can_save = bool(st.session_state.get("workspace_id"))
+    save_btn = st.button("Save to Workspace", type="primary", disabled=not can_save)
+
+if not can_save:
+    st.caption("Enter a Workspace ID in the sidebar to enable saving.")
+
+if save_btn and can_save:
+    ws_id = st.session_state["workspace_id"]
+    expected_version = st.session_state.get("ws_version", 0)
+    df_to_save = df_in.copy()
+    try:
+        new_version = write_workspace(ws_id, df_to_save, expected_version=expected_version)
+        st.session_state["ws_version"] = new_version
+        st.success(f"Saved workspace '{ws_id}' (version {new_version}).")
+    except VersionConflict as vc:
+        st.warning(str(vc))
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Reload from Sheets"):
+                df_ws, meta = read_workspace(ws_id, DEFAULT_HEADERS)
+                st.session_state["ws_version"] = int(meta.get("version", 0))
+                st.experimental_rerun()
+        with c2:
+            if st.button("Overwrite anyway"):
+                try:
+                    new_version = write_workspace(ws_id, df_to_save, expected_version=None)
+                    st.session_state["ws_version"] = new_version
+                    st.success(f"Overwrote workspace '{ws_id}' (version {new_version}).")
+                except Exception as e:
+                    st.error(f"Could not overwrite: {e}")
+    except Exception as e:
+        st.error(f"Save failed: {e}")
+
 
 # --------------------------
 # Build & Render Sankey
