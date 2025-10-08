@@ -10,6 +10,13 @@ from utils.sankey import prepare_sankey_data, make_sankey_figure
 from utils.constants import SAMPLE_CSV, DEFAULT_HEADERS, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB
 from utils.sheets import read_workspace, write_workspace, sanitize_workspace_id, VersionConflict
 
+# Streamlit rerun compatibility
+def _rerun():
+    try:
+        st.rerun()
+    except AttributeError:
+        st.experimental_rerun()
+
 
 st.set_page_config(page_title="Budget App", layout="wide")
 st.title("Budget App")
@@ -212,11 +219,12 @@ if not can_save:
 if save_btn and can_save:
     ws_id = st.session_state["workspace_id"]
     expected_version = st.session_state.get("ws_version", 0)
-    df_to_save = df_in.copy()
+    df_to_save = edited_df.copy()   # always save what the user is seeing in the editor
     try:
         new_version = write_workspace(ws_id, df_to_save, expected_version=expected_version)
         st.session_state["ws_version"] = new_version
         st.success(f"Saved workspace '{ws_id}' (version {new_version}).")
+        _rerun()
     except VersionConflict as vc:
         st.warning(str(vc))
         c1, c2 = st.columns(2)
