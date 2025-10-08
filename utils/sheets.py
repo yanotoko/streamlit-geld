@@ -227,7 +227,12 @@ def write_workspace(
 
     # Write (clear + full data write with headers)
     ws.clear()
-    set_with_dataframe(ws, df)
+    set_with_dataframe(ws,
+                        df,
+                        include_index=False,             # <- do not write the index
+                        include_column_header=True,
+                        resize=True
+)
 
     # Bump version & update meta
     new_version = current_version + 1
