@@ -7,8 +7,16 @@ from streamlit_echarts import st_echarts
 from utils.echarts import make_echarts_sankey_options
 from utils.io import read_csv_any, read_table_any, get_excel_sheets, validate_upload
 from utils.sankey import prepare_sankey_data, make_sankey_figure
-from utils.constants import SAMPLE_CSV, DEFAULT_HEADERS, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB
-from utils.sheets import read_workspace, write_workspace, sanitize_workspace_id, VersionConflict
+
+from utils.constants import (
+    SAMPLE_CSV, DEFAULT_HEADERS, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB,
+    LOOKUP_HEADERS, FREQUENCY_CHOICES,
+)
+from utils.sheets import (
+    read_workspace, write_workspace, sanitize_workspace_id, VersionConflict,
+    read_lookup_for_ws, write_lookup_for_ws,
+)
+
 
 # Streamlit rerun compatibility
 def _rerun():
@@ -166,11 +174,72 @@ st.subheader("Data Preview")
 st.caption(f"Source: **{source_name}**")
 st.dataframe(df_raw.head(50), use_container_width=True)
 
+# --- Load per-workspace lookup (seeded from current Level1 values if new/empty) ---
+ws_id = st.session_state.get("workspace_id", "").strip()
+
+if ws_id:
+    # Build a starter from current data's unique Level1 values (default monthly, factor 1.0)
+    starter = None
+    if l1 in df_raw.columns:
+        starter_levels = sorted(
+            df_raw[l1].dropna().astype(str).str.strip().unique().tolist()
+        )
+        if starter_levels:
+            starter = [{"Level1": x, "Frequency": "monthly", "Factor_per_month": 1.0} for x in starter_levels]
+
+    try:
+        df_lookup = read_lookup_for_ws(ws_id, starter_rows=starter)
+    except Exception as e:
+        st.warning(f"Could not load lookup for '{ws_id}': {e}")
+        df_lookup = pd.DataFrame(columns=LOOKUP_HEADERS)
+else:
+    st.info("No workspace selected — per-workspace lookup disabled.")
+    df_lookup = pd.DataFrame(columns=LOOKUP_HEADERS)
+
+
+# Edit Lookup frequency values
+st.sidebar.header("2b) Frequency Lookup (per workspace)")
+with st.sidebar.expander("View/Edit Lookup", expanded=False):
+    st.caption("Maps Level 1 values to Frequency and a monthly factor (workspace-specific).")
+    df_lookup_edit = st.data_editor(
+        df_lookup,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Level1": st.column_config.TextColumn("Level1"),
+            "Frequency": st.column_config.SelectboxColumn("Frequency", options=FREQUENCY_CHOICES, required=False),
+            "Factor_per_month": st.column_config.NumberColumn("Factor per month", step=0.0001, format="%.4f"),
+        },
+        key="lookup_editor",
+        disabled=not bool(ws_id),
+    )
+    if ws_id and st.button("Save Lookup"):
+        try:
+            df_le = df_lookup_edit.copy()
+            df_le["Level1"] = df_le["Level1"].astype(str).str.strip()
+            df_le["Frequency"] = df_le["Frequency"].astype(str).str.strip()
+            df_le["Factor_per_month"] = pd.to_numeric(df_le["Factor_per_month"], errors="coerce").fillna(1.0)
+            write_lookup_for_ws(ws_id, df_le)
+            st.success("Lookup saved.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Saving lookup failed: {e}")
+
+
+# 2c) Filter (applies ONLY to Level 1)
+st.sidebar.header("2c) Filter")
+level1_values_all = sorted([str(x) for x in df_raw[l1].dropna().unique().tolist()]) if l1 in df_raw.columns else []
+level1_selected = st.sidebar.multiselect("Show only these Level 1 values", options=level1_values_all, default=level1_values_all)
+
+
 # --------------------------
 # Chart style select
 # --------------------------
 
 st.sidebar.header("3) Visualization")
+normalize = st.sidebar.checkbox("Normalize to monthly equivalents (uses lookup factors)", value=False)
+
 chart_type = st.sidebar.selectbox(
     "Choose a chart",
     ["Sankey (Plotly)", "Sankey (ECharts, labels always on)"],
@@ -205,6 +274,29 @@ with col_a:
 with col_b:
     csv_bytes = edited_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download Edited CSV", csv_bytes, "edited_data.csv", "text/csv", use_container_width=True)
+
+
+viz_df = edited_df.copy()
+
+# Apply Level-1 filter (visualization only)
+if l1 in viz_df.columns and 'level1_selected' in locals() and level1_selected:
+    viz_df = viz_df[viz_df[l1].astype(str).isin(level1_selected)]
+
+# Decide which value column to feed the Sankey
+val_to_use = val_col
+if ws_id and not df_lookup.empty and l1 in viz_df.columns and normalize:
+    df_norm = viz_df.merge(
+        df_lookup[["Level1", "Factor_per_month"]],
+        how="left",
+        left_on=l1,
+        right_on="Level1"
+    )
+    df_norm["Factor_per_month"] = pd.to_numeric(df_norm["Factor_per_month"], errors="coerce").fillna(1.0)
+    df_norm["_AmountMonthly"] = pd.to_numeric(df_norm[val_col], errors="coerce").fillna(0) * df_norm["Factor_per_month"]
+    val_to_use = "_AmountMonthly"
+else:
+    df_norm = viz_df.copy()
+
 
 # 3d — Save to Google Sheets workspace
 st.divider()
@@ -245,12 +337,36 @@ if save_btn and can_save:
         st.error(f"Save failed: {e}")
 
 
+# Build a visualization DataFrame from the editor (not saved data)
+viz_df = edited_df.copy()
+
+# Apply Level-1 filter (visualization only)
+if l1 in viz_df.columns and level1_selected:
+    viz_df = viz_df[viz_df[l1].astype(str).isin(level1_selected)]
+
+
 # --------------------------
 # Build & Render Sankey
 # --------------------------
+
+# Decide which value column to feed the Sankey
+val_to_use = val_col
+if normalize and l1 in viz_df.columns:
+    # join to lookup on Level1 (left_on=l1, right_on='Level1')
+    join_cols = ["Level1", "Factor_per_month", "Frequency"]
+    df_norm = viz_df.merge(df_lookup[["Level1", "Factor_per_month"]], how="left",
+                           left_on=l1, right_on="Level1")
+    df_norm["Factor_per_month"] = pd.to_numeric(df_norm["Factor_per_month"], errors="coerce").fillna(1.0)
+    df_norm["_AmountMonthly"] = pd.to_numeric(df_norm[val_col], errors="coerce").fillna(0) * df_norm["Factor_per_month"]
+    val_to_use = "_AmountMonthly"
+else:
+    df_norm = viz_df.copy()
+
 st.subheader("Income flow")
 try:
-    sankey_data = prepare_sankey_data(df_in, l1=l1, l2=l2, l3=l3, value_col=val_col)
+    #sankey_data = prepare_sankey_data(df_in, l1=l1, l2=l2, l3=l3, value_col=val_col)
+    sankey_data = prepare_sankey_data(df_norm, l1=l1, l2=l2, l3=l3, value_col=val_to_use)
+
 
     if chart_type == "Sankey (Plotly)":
         fig = make_sankey_figure(

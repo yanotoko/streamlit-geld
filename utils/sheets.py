@@ -10,6 +10,7 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread_dataframe import set_with_dataframe, get_as_dataframe
+from utils.constants import LOOKUP_SHEET_PREFIX, LOOKUP_HEADERS
 
 
 SCOPES = [
@@ -245,3 +246,69 @@ def write_workspace(
         schema_hash=_hash_columns(list(df.columns)),
     )
     return new_version
+
+# --- Per-workspace lookup sheet helpers ---
+
+def _lookup_sheet_title_for_ws(workspace_id: str) -> str:
+    """
+    Build the lookup worksheet title for a given workspace.
+    Example: IncomeMaster__team_alpha
+    """
+    tab_title = sanitize_workspace_id(workspace_id)
+    return f"{LOOKUP_SHEET_PREFIX}__{tab_title}" if tab_title else LOOKUP_SHEET_PREFIX
+
+
+def ensure_lookup_sheet_for_ws(spreadsheet, workspace_id: str, headers: List[str], starter_rows: Optional[List[Dict]] = None) -> gspread.Worksheet:
+    """
+    Ensure a per-workspace lookup sheet exists with the given headers.
+    If starter_rows is provided and the sheet is empty, seed it.
+    """
+    title = _lookup_sheet_title_for_ws(workspace_id)
+    try:
+        ws = spreadsheet.worksheet(title)
+    except gspread.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=title, rows=200, cols=max(10, len(headers) + 2))
+        ws.update("A1", [headers])
+        if starter_rows:
+            df = pd.DataFrame(starter_rows, columns=headers)
+            set_with_dataframe(ws, df, include_index=False, include_column_header=True)
+        return ws
+
+    # If existing but empty (no headers), set headers and seed
+    first_row = ws.row_values(1)
+    if not first_row:
+        ws.update("A1", [headers])
+        if starter_rows:
+            df = pd.DataFrame(starter_rows, columns=headers)
+            set_with_dataframe(ws, df, include_index=False, include_column_header=True)
+    return ws
+
+
+def read_lookup_for_ws(workspace_id: str, starter_rows: Optional[List[Dict]] = None) -> pd.DataFrame:
+    """
+    Read the per-workspace lookup sheet. If it doesn't exist, create it.
+    If it's empty, optionally seed with starter_rows.
+    """
+    ss = _open_spreadsheet()
+    ws = ensure_lookup_sheet_for_ws(ss, workspace_id, LOOKUP_HEADERS, starter_rows)
+    df = get_as_dataframe(ws, evaluate_formulas=True, header=0, dtype=None)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=LOOKUP_HEADERS)
+
+    # Keep only known columns, normalize types
+    df = df[LOOKUP_HEADERS].copy()
+    df["Level1"] = df["Level1"].astype(str).str.strip()
+    df["Frequency"] = df["Frequency"].astype(str).str.strip()
+    df["Factor_per_month"] = pd.to_numeric(df["Factor_per_month"], errors="coerce").fillna(1.0)
+    return df
+
+
+def write_lookup_for_ws(workspace_id: str, df: pd.DataFrame) -> None:
+    """
+    Overwrite the per-workspace lookup sheet with df.
+    """
+    ss = _open_spreadsheet()
+    ws = ensure_lookup_sheet_for_ws(ss, workspace_id, LOOKUP_HEADERS)
+    ws.clear()
+    out = pd.DataFrame(df, columns=LOOKUP_HEADERS)
+    set_with_dataframe(ws, out, include_index=False, include_column_header=True, resize=True)

@@ -20,3 +20,12 @@ ALLOWED_MIME = {
     # Some browsers use this for Excel; allow it but still require an allowed extension:
     "application/octet-stream",
 }
+
+# Lookup sheet: per-workspace
+LOOKUP_SHEET_PREFIX = "IncomeMaster"   # final sheet will be: IncomeMaster__<workspace_tab>
+
+# Lookup schema
+LOOKUP_HEADERS = ["Level1", "Frequency", "Factor_per_month"]
+
+# Optional: allowed frequency values (for UI validation/help text)
+FREQUENCY_CHOICES = ["weekly", "biweekly", "semimonthly", "monthly", "quarterly", "yearly"]
