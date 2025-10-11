@@ -1,4 +1,4 @@
-# app/streamlit_app.py (imports)
+# app/streamlit_app.py
 import io
 import pandas as pd
 import streamlit as st
@@ -11,16 +11,16 @@ from utils.sankey import prepare_sankey_data, make_sankey_figure
 from utils.constants import SAMPLE_CSV, DEFAULT_HEADERS, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB, LOOKUP_HEADERS, FREQUENCY_CHOICES
 from utils.sheets import read_workspace, write_workspace, sanitize_workspace_id, VersionConflict, read_lookup_for_ws, write_lookup_for_ws
 
-# ---- Cached readers to reduce Google Sheets hits ----
+# --------------------------
+# Cached readers to reduce Google Sheets hits
+# --------------------------
 @st.cache_data(ttl=20, show_spinner=False)
 def _cached_read_workspace(ws_id: str, default_headers, version_key: int, cache_bump: int):
-    # version_key + cache_bump make the cache entry change when data changes or we force-invalidate
     return read_workspace(ws_id, default_headers)
 
 @st.cache_data(ttl=20, show_spinner=False)
 def _cached_read_lookup(ws_id: str, cache_bump: int):
     return read_lookup_for_ws(ws_id, starter_rows=None)
-
 
 # Streamlit rerun compatibility
 def _rerun():
@@ -29,63 +29,38 @@ def _rerun():
     except AttributeError:
         st.experimental_rerun()
 
-
 st.set_page_config(page_title="Budget App", layout="wide")
 st.title("Budget App")
 
-# --- Sidebar: Upload + Options ---
-# --- Sidebar: Workspace (public app uses Workspace ID) ---
-st.sidebar.header("0) Workspace")
-ws_input = st.sidebar.text_input("Workspace ID", value=st.session_state.get("workspace_id", ""))
-col_ws1, col_ws2 = st.sidebar.columns([1, 1])
-with col_ws1:
-    load_ws = st.button("Load workspace", use_container_width=True)
-with col_ws2:
-    # optional UX: create if missing (load does this anyway); kept for clarity
-    create_ws = st.button("Create if missing", use_container_width=True)
+# =======================================================================================
+# ============ SIDEBAR (clean, guided flow) ============================================
+# =======================================================================================
 
-if load_ws or create_ws:
+# 1) WORKSPACE
+st.sidebar.header("1) Workspace")
+with st.sidebar.form(key="ws_form", clear_on_submit=False):
+    ws_input = st.text_input(
+        "Workspace ID",
+        value=st.session_state.get("workspace_id", ""),
+        help="Public app: any non-PII name. Data will be saved under this ID."
+    )
+    ws_submit = st.form_submit_button("Use workspace")
+if ws_submit:
     st.session_state["workspace_id"] = ws_input.strip()
-
-
-st.sidebar.header("1) Upload file")
-uploaded = st.sidebar.file_uploader(
-    "Choose a CSV or Excel file",
-    type=[ext.lstrip(".") for ext in ALLOWED_EXTS]
-)
-st.sidebar.caption(f"Allowed: CSV, XLSX/XLS/XLSM • Max size: {MAX_UPLOAD_MB} MB")
-
-st.sidebar.download_button(
-    "Download sample.csv",
-    data=SAMPLE_CSV,
-    file_name="sample.csv",
-    mime="text/csv",
-    use_container_width=True
-)
-
-# 3c — Load order with seeding/import support
-df_raw = None
-source_name = ""
-df_uploaded = None
 
 ws_id = st.session_state.get("workspace_id", "").strip()
 ws_tab = sanitize_workspace_id(ws_id) if ws_id else ""
-ws_loaded = False
-ws_empty = True
+st.session_state.setdefault("cache_bump", 0)
 
-# Try to read workspace (but don't lock in as df_raw yet)
-if ws_id:
-    try:
-        ws_ver = st.session_state.get("ws_version", 0)
-        st.session_state.setdefault("cache_bump", 0)
-        df_ws, meta = _cached_read_workspace(ws_id, DEFAULT_HEADERS, ws_ver, st.session_state["cache_bump"])
-        ws_loaded = True
-        ws_empty = df_ws.dropna(how="all").shape[0] == 0
-        st.session_state["ws_version"] = int(meta.get("version", 0))
-    except Exception as e:
-        st.error(f"Could not load workspace '{ws_id}': {e}")
+# 2) DATA SOURCE
+st.sidebar.divider()
+st.sidebar.header("2) Data source")
+st.sidebar.caption("Load from a workspace or upload a file. You can import an upload into your workspace.")
 
-# Parse uploaded file regardless of workspace state
+uploaded = st.sidebar.file_uploader("Upload CSV or Excel", type=[ext.lstrip(".") for ext in ALLOWED_EXTS])
+
+# Parse uploaded (if any)
+df_uploaded, upload_name = None, None
 if uploaded is not None:
     ok, msg = validate_upload(
         uploaded,
@@ -101,65 +76,87 @@ if uploaded is not None:
     ext = upload_name.split(".")[-1].lower()
     if ext in {"xlsx", "xls", "xlsm"}:
         sheets = get_excel_sheets(uploaded)
-        sheet = st.sidebar.selectbox("Sheet", sheets, index=0)
+        sheet = st.sidebar.selectbox("Excel sheet", sheets, index=0)
         df_uploaded = read_table_any(uploaded, sheet_name=sheet)
     else:
         df_uploaded = read_table_any(uploaded)
+    st.sidebar.caption(f"Detected file: **{upload_name}**")
 
-# Decide what to show/edit
-if ws_loaded and not ws_empty:
-    df_raw = df_ws
-    source_name = f"Google Sheets (tab: {ws_tab})"
+# Try loading workspace (cached)
+df_ws, ws_loaded, ws_empty = None, False, True
+if ws_id:
+    try:
+        ws_ver = st.session_state.get("ws_version", 0)
+        df_ws, meta = _cached_read_workspace(ws_id, DEFAULT_HEADERS, ws_ver, st.session_state["cache_bump"])
+        ws_loaded, ws_empty = True, df_ws.dropna(how="all").shape[0] == 0
+        st.session_state["ws_version"] = int(meta.get("version", 0))
+    except Exception as e:
+        st.error(f"Could not load workspace '{ws_id}': {e}")
+
+# Choose source
+if ws_loaded and not ws_empty and df_uploaded is not None:
+    source_choice = st.sidebar.radio("Use data from", ("Workspace", "Uploaded file"), index=0, horizontal=True)
+elif ws_loaded and not ws_empty:
+    source_choice = "Workspace"
 elif df_uploaded is not None:
-    df_raw = df_uploaded
+    source_choice = "Uploaded file"
+else:
+    source_choice = None
+
+# Import uploaded → workspace
+if ws_id and df_uploaded is not None:
+    with st.sidebar.expander("Import uploaded into workspace", expanded=False):
+        st.write("This will create or overwrite the workspace tab with the uploaded file.")
+        col_imp1, col_imp2 = st.columns(2)
+        if col_imp1.button("Import uploaded → Workspace", use_container_width=True):
+            try:
+                expected = None if ws_empty else st.session_state.get("ws_version", 0)
+                new_version = write_workspace(ws_id, df_uploaded, expected_version=expected)
+                st.session_state["ws_version"] = new_version
+                st.success(f"Imported into '{ws_id}' (version {new_version}).")
+                st.session_state["cache_bump"] += 1
+                _rerun()
+            except VersionConflict as vc:
+                st.warning(str(vc))
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Reload workspace"):
+                        _rerun()
+                with c2:
+                    if st.button("Force overwrite"):
+                        try:
+                            new_version = write_workspace(ws_id, df_uploaded, expected_version=None)
+                            st.session_state["ws_version"] = new_version
+                            st.success(f"Overwrote '{ws_id}' (version {new_version}).")
+                            st.session_state["cache_bump"] += 1
+                            _rerun()
+                        except Exception as e:
+                            st.error(f"Overwrite failed: {e}")
+
+# Fallback sample downloader
+st.sidebar.download_button(
+    "Download sample.csv",
+    data=SAMPLE_CSV,
+    file_name="sample.csv",
+    mime="text/csv",
+    use_container_width=True
+)
+
+# Materialize df_raw + source_name
+if source_choice == "Workspace":
+    df_raw = df_ws.copy()
+    source_name = f"Google Sheets (tab: {ws_tab})"
+elif source_choice == "Uploaded file":
+    df_raw = df_uploaded.copy()
     source_name = upload_name
 else:
     st.info("No workspace data or upload found. Using the built-in **sample dataset**.")
     df_raw = read_csv_any(io.StringIO(SAMPLE_CSV))
     source_name = "sample.csv"
 
-# If both exist (non-empty workspace AND an upload), let user pick
-if ws_loaded and not ws_empty and df_uploaded is not None:
-    choice = st.sidebar.radio("Use data from", ("Workspace", "Uploaded file"), index=0)
-    if choice == "Uploaded file":
-        df_raw = df_uploaded
-        source_name = upload_name
-
-# 3e — Import uploaded file into the selected workspace
-if ws_id and df_uploaded is not None:
-    st.sidebar.markdown("---")
-    if st.sidebar.button("Import uploaded → Workspace", use_container_width=True):
-        try:
-            expected = None if ws_empty else st.session_state.get("ws_version", 0)
-            new_version = write_workspace(ws_id, df_uploaded, expected_version=expected)
-            st.session_state["ws_version"] = new_version
-            st.sidebar.success(f"Imported into '{ws_id}' (version {new_version}).")
-            st.rerun()
-        except VersionConflict as vc:
-            st.sidebar.warning(str(vc))
-            col_imp1, col_imp2 = st.sidebar.columns(2)
-            with col_imp1:
-                if st.button("Reload workspace"):
-                    df_ws, meta = read_workspace(ws_id, DEFAULT_HEADERS)
-                    st.session_state["ws_version"] = int(meta.get("version", 0))
-                    st.rerun()
-            with col_imp2:
-                if st.button("Force overwrite"):
-                    try:
-                        new_version = write_workspace(ws_id, df_uploaded, expected_version=None)
-                        st.session_state["ws_version"] = new_version
-                        st.sidebar.success(f"Overwrote '{ws_id}' (version {new_version}).")
-                        st.rerun()
-                    except Exception as e:
-                        st.sidebar.error(f"Overwrite failed: {e}")
-        except Exception as e:
-            st.sidebar.error(f"Import failed: {e}")
-
-
-# --------------------------
-# Column Mapping
-# --------------------------
-st.sidebar.header("2) Map Columns")
+# 3) MAP COLUMNS
+st.sidebar.divider()
+st.sidebar.header("3) Map columns")
 all_cols = list(df_raw.columns)
 
 def guess(col_names, candidates):
@@ -168,39 +165,61 @@ def guess(col_names, candidates):
             return c
     return col_names[0] if col_names else None
 
-l1 = st.sidebar.selectbox("Level 1 (e.g., Income)", all_cols, index=all_cols.index(guess(all_cols, ["Income", "Income"])) if all_cols else 0)
-l2 = st.sidebar.selectbox("Level 2 (e.g., Category)", all_cols, index=all_cols.index(guess(all_cols, ["Subcategory", "Category"])) if all_cols else 0)
-l3 = st.sidebar.selectbox("Level 3 (e.g., Bank Account)", all_cols, index=all_cols.index(guess(all_cols, ["Bank Account","Account","Destination"])) if all_cols else 0)
-val_col = st.sidebar.selectbox("Value column (numeric)", all_cols, index=all_cols.index(guess(all_cols, ["Amount","Value","Count"])) if all_cols else 0)
+l1 = st.sidebar.selectbox("Level 1", all_cols, index=all_cols.index(guess(all_cols, ["Income"])) if all_cols else 0,
+                          help="Top level (e.g., Income)")
+l2 = st.sidebar.selectbox("Level 2", all_cols, index=all_cols.index(guess(all_cols, ["Bank Account","Account","Destination"])) if all_cols else 0,
+                          help="Second level (e.g., Category)")
+l3 = st.sidebar.selectbox("Level 3", all_cols, index=all_cols.index(guess(all_cols, ["Subcategory","Category"])) if all_cols else 0,
+                          help="Third level (e.g., Bank Account)")
+val_col = st.sidebar.selectbox("Value (numeric)", all_cols, index=all_cols.index(guess(all_cols, ["Amount","Value","Count"])) if all_cols else 0)
 
 if len({l1, l2, l3}) < 3:
     st.sidebar.warning("Each level should be a different column.")
 
-st.subheader("Data Preview")
-st.caption(f"Source: **{source_name}**")
-st.dataframe(df_raw.head(50), use_container_width=True)
+# 4) FILTER & VISUALIZATION
+st.sidebar.divider()
+st.sidebar.header("4) Filter & visualization")
 
-# --- Load per-workspace lookup (seeded from current Level1 values if new/empty) ---
-ws_id = st.session_state.get("workspace_id", "").strip()
+# Level-1 filter
+level1_values_all = sorted([str(x) for x in df_raw[l1].dropna().unique().tolist()]) if l1 in df_raw.columns else []
+level1_selected = st.sidebar.multiselect("Show only Level 1 values", options=level1_values_all, default=level1_values_all)
 
+# Normalize toggle
+normalize = st.sidebar.checkbox("Normalize to monthly equivalents", value=False,
+                                help="Uses per-workspace Frequency factors to convert to monthly.")
+
+st.sidebar.divider()
+# Chart choice
+chart_type = st.sidebar.selectbox("Chart type", ["Sankey (Plotly)", "Sankey (ECharts, labels always on)"], index=1)
+
+# ECharts advanced
+if chart_type.startswith("Sankey (ECharts"):
+    #with st.sidebar.expander("Advanced (ECharts)", expanded=False):
+    ech_curveness = st.sidebar.slider("Link curveness", 0.0, 1.0, 0.5, 0.05)
+    ech_edge_font = st.sidebar.number_input("Edge label font size", 8, 24, 11, 1)
+st.sidebar.divider()
+# =======================================================================================
+# ========================= MAIN BODY ===================================================
+# =======================================================================================
+
+# # Data Preview
+# st.subheader("Data Preview")
+# st.caption(f"Source: **{source_name}**")
+# st.dataframe(df_raw.head(50), use_container_width=True)
+
+# --- Load per-workspace lookup (seed from current Level1 values if empty) ---
+df_lookup = pd.DataFrame(columns=LOOKUP_HEADERS)  # safe default
 if ws_id:
-    # Build a starter from current data's unique Level1 values (default monthly, factor 1.0)
     starter = None
     if l1 in df_raw.columns:
-        starter_levels = sorted(
-            df_raw[l1].dropna().astype(str).str.strip().unique().tolist()
-        )
+        starter_levels = sorted(df_raw[l1].dropna().astype(str).str.strip().unique().tolist())
         if starter_levels:
             starter = [{"Level1": x, "Frequency": "monthly", "Factor_per_month": 1.0} for x in starter_levels]
-
     try:
-        st.session_state.setdefault("cache_bump", 0)
-        # seed once if you want, but cache call uses no starter_rows (to keep cache key simple)
-        if 'df_lookup_seeded' not in st.session_state and starter:
+        if "df_lookup_seeded" not in st.session_state and starter:
             try:
-                # Try creating/seed if empty (cheap one-time op)
                 _ = read_lookup_for_ws(ws_id, starter_rows=starter)
-                st.session_state['df_lookup_seeded'] = True
+                st.session_state["df_lookup_seeded"] = True
             except Exception:
                 pass
         df_lookup = _cached_read_lookup(ws_id, st.session_state["cache_bump"])
@@ -211,9 +230,8 @@ else:
     st.info("No workspace selected — per-workspace lookup disabled.")
     df_lookup = pd.DataFrame(columns=LOOKUP_HEADERS)
 
-
-# Edit Lookup frequency values
-st.sidebar.header("2b) Frequency Lookup (per workspace)")
+# Optional: edit per-workspace lookup in sidebar
+st.sidebar.header("4b) Frequency Lookup (per workspace)")
 with st.sidebar.expander("View/Edit Lookup", expanded=False):
     st.caption("Maps Level 1 values to Frequency and a monthly factor (workspace-specific).")
     df_lookup_edit = st.data_editor(
@@ -237,40 +255,16 @@ with st.sidebar.expander("View/Edit Lookup", expanded=False):
             df_le["Factor_per_month"] = pd.to_numeric(df_le["Factor_per_month"], errors="coerce").fillna(1.0)
             write_lookup_for_ws(ws_id, df_le)
             st.success("Lookup saved.")
-            st.rerun()
+            st.session_state["cache_bump"] += 1
+            _rerun()
         except Exception as e:
             st.error(f"Saving lookup failed: {e}")
-
-
-# 2c) Filter (applies ONLY to Level 1)
-st.sidebar.header("2c) Filter")
-level1_values_all = sorted([str(x) for x in df_raw[l1].dropna().unique().tolist()]) if l1 in df_raw.columns else []
-level1_selected = st.sidebar.multiselect("Show only these Level 1 values", options=level1_values_all, default=level1_values_all)
-
-
-# --------------------------
-# Chart style select
-# --------------------------
-
-st.sidebar.header("3) Visualization")
-normalize = st.sidebar.checkbox("Normalize to monthly equivalents (uses lookup factors)", value=False)
-
-chart_type = st.sidebar.selectbox(
-    "Choose a chart",
-    ["Sankey (Plotly)", "Sankey (ECharts, labels always on)"],
-    index=1
-)
-
-# Optional ECharts-only knobs
-if chart_type == "Sankey (ECharts, labels always on)":
-    ech_curveness = st.sidebar.slider("ECharts link curveness", 0.0, 1.0, 0.5, 0.05)
-    ech_edge_font = st.sidebar.number_input("Edge label font size", 8, 24, 11, 1)
-
 
 # --------------------------
 # Editable table
 # --------------------------
 st.subheader("Edit Data")
+st.caption(f"Source: **{source_name}**")
 edited_df = st.data_editor(
     df_raw,
     num_rows="dynamic",
@@ -290,16 +284,60 @@ with col_b:
     csv_bytes = edited_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download Edited CSV", csv_bytes, "edited_data.csv", "text/csv", use_container_width=True)
 
+# --------------------------
+# Save to Google Sheets workspace
+# --------------------------
+st.divider()
+save_col1, save_col2 = st.columns([1, 3])
+with save_col1:
+    can_save = bool(ws_id)
+    save_btn = st.button("Save to Workspace", type="primary", disabled=not can_save)
 
+if not can_save:
+    st.caption("Enter a Workspace ID in the sidebar to enable saving.")
+
+if save_btn and can_save:
+    expected_version = st.session_state.get("ws_version", 0)
+    df_to_save = edited_df.copy()  # always save what the user is seeing in the editor
+    try:
+        new_version = write_workspace(ws_id, df_to_save, expected_version=expected_version)
+        st.session_state["ws_version"] = new_version
+        st.success(f"Saved workspace '{ws_id}' (version {new_version}).")
+        st.session_state["cache_bump"] += 1
+        _rerun()
+    except VersionConflict as vc:
+        st.warning(str(vc))
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Reload from Sheets"):
+                _rerun()
+        with c2:
+            if st.button("Overwrite anyway"):
+                try:
+                    new_version = write_workspace(ws_id, df_to_save, expected_version=None)
+                    st.session_state["ws_version"] = new_version
+                    st.success(f"Overwrote workspace '{ws_id}' (version {new_version}).")
+                    st.session_state["cache_bump"] += 1
+                    _rerun()
+                except Exception as e:
+                    st.error(f"Could not overwrite: {e}")
+    except Exception as e:
+        st.error(f"Save failed: {e}")
+
+# --------------------------
+# Build visualization dataframe (filter + normalization)
+# --------------------------
 viz_df = edited_df.copy()
 
 # Apply Level-1 filter (visualization only)
-if l1 in viz_df.columns and 'level1_selected' in locals() and level1_selected:
+if l1 in viz_df.columns and level1_selected:
     viz_df = viz_df[viz_df[l1].astype(str).isin(level1_selected)]
 
 # Decide which value column to feed the Sankey
 val_to_use = val_col
-if ws_id and not df_lookup.empty and l1 in viz_df.columns and normalize:
+use_lookup = bool(ws_id) and not df_lookup.empty and (l1 in viz_df.columns)
+
+if normalize and use_lookup:
     df_norm = viz_df.merge(
         df_lookup[["Level1", "Factor_per_month"]],
         how="left",
@@ -312,90 +350,28 @@ if ws_id and not df_lookup.empty and l1 in viz_df.columns and normalize:
 else:
     df_norm = viz_df.copy()
 
-
-# 3d — Save to Google Sheets workspace
-st.divider()
-save_col1, save_col2 = st.columns([1, 3])
-with save_col1:
-    can_save = bool(st.session_state.get("workspace_id"))
-    save_btn = st.button("Save to Workspace", type="primary", disabled=not can_save)
-
-if not can_save:
-    st.caption("Enter a Workspace ID in the sidebar to enable saving.")
-
-if save_btn and can_save:
-    ws_id = st.session_state["workspace_id"]
-    expected_version = st.session_state.get("ws_version", 0)
-    df_to_save = edited_df.copy()   # always save what the user is seeing in the editor
-    try:
-        new_version = write_workspace(ws_id, df_to_save, expected_version=expected_version)
-        st.session_state["ws_version"] = new_version
-        st.success(f"Saved workspace '{ws_id}' (version {new_version}).")
-        _rerun()
-    except VersionConflict as vc:
-        st.warning(str(vc))
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Reload from Sheets"):
-                df_ws, meta = read_workspace(ws_id, DEFAULT_HEADERS)
-                st.session_state["ws_version"] = int(meta.get("version", 0))
-                st.rerun()
-        with c2:
-            if st.button("Overwrite anyway"):
-                try:
-                    new_version = write_workspace(ws_id, df_to_save, expected_version=None)
-                    st.session_state["ws_version"] = new_version
-                    st.success(f"Overwrote workspace '{ws_id}' (version {new_version}).")
-                except Exception as e:
-                    st.error(f"Could not overwrite: {e}")
-    except Exception as e:
-        st.error(f"Save failed: {e}")
-
-# After successful write (you already set ws_version), add:
-st.session_state["cache_bump"] = st.session_state.get("cache_bump", 0) + 1
-
-# Build a visualization DataFrame from the editor (not saved data)
-viz_df = edited_df.copy()
-
-# Apply Level-1 filter (visualization only)
-if l1 in viz_df.columns and level1_selected:
-    viz_df = viz_df[viz_df[l1].astype(str).isin(level1_selected)]
-
-
 # --------------------------
 # Build & Render Sankey
 # --------------------------
-
-# Decide which value column to feed the Sankey
-val_to_use = val_col
-if normalize and l1 in viz_df.columns:
-    # join to lookup on Level1 (left_on=l1, right_on='Level1')
-    join_cols = ["Level1", "Factor_per_month", "Frequency"]
-    df_norm = viz_df.merge(df_lookup[["Level1", "Factor_per_month"]], how="left",
-                           left_on=l1, right_on="Level1")
-    df_norm["Factor_per_month"] = pd.to_numeric(df_norm["Factor_per_month"], errors="coerce").fillna(1.0)
-    df_norm["_AmountMonthly"] = pd.to_numeric(df_norm[val_col], errors="coerce").fillna(0) * df_norm["Factor_per_month"]
-    val_to_use = "_AmountMonthly"
-else:
-    df_norm = viz_df.copy()
-
 st.subheader("Income flow")
 try:
-    #sankey_data = prepare_sankey_data(df_in, l1=l1, l2=l2, l3=l3, value_col=val_col)
     sankey_data = prepare_sankey_data(df_norm, l1=l1, l2=l2, l3=l3, value_col=val_to_use)
 
+    # Ensure ECharts knobs have safe defaults if user picked Plotly
+    if chart_type.startswith("Sankey (ECharts") and "ech_curveness" not in locals():
+        ech_curveness, ech_edge_font = 0.5, 11
 
     if chart_type == "Sankey (Plotly)":
         fig = make_sankey_figure(
             sankey_data,
-            title=f"{l1} → {l2} → {l3}"
+            title=f"{l1} \u2192 {l2} \u2192 {l3}"
         )
         st.plotly_chart(fig, use_container_width=True)
 
     elif chart_type == "Sankey (ECharts, labels always on)":
         options = make_echarts_sankey_options(
             sankey_data,
-            title=f"{l1} → {l2} → {l3}",
+            title=f"{l1} \u2192 {l2} \u2192 {l3}",
             value_suffix=" $",        # optional
             curveness=ech_curveness,
             edge_font_size=int(ech_edge_font),
@@ -408,12 +384,3 @@ try:
 
 except Exception as e:
     st.error(f"Could not render chart: {e}")
-
-
-# st.subheader("Income flow")
-# try:
-#     sankey_data = prepare_sankey_data(df_in, l1=l1, l2=l2, l3=l3, value_col=val_col)
-#     fig = make_sankey_figure(sankey_data, title=f"{l1} → {l2} → {l3}")
-#     st.plotly_chart(fig, use_container_width=True)
-# except Exception as e:
-#     st.error(f"Could not render Sankey chart: {e}")
