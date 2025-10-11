@@ -11,6 +11,16 @@ from utils.sankey import prepare_sankey_data, make_sankey_figure
 from utils.constants import SAMPLE_CSV, DEFAULT_HEADERS, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB, LOOKUP_HEADERS, FREQUENCY_CHOICES
 from utils.sheets import read_workspace, write_workspace, sanitize_workspace_id, VersionConflict, read_lookup_for_ws, write_lookup_for_ws
 
+# ---- Cached readers to reduce Google Sheets hits ----
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_read_workspace(ws_id: str, default_headers, version_key: int, cache_bump: int):
+    # version_key + cache_bump make the cache entry change when data changes or we force-invalidate
+    return read_workspace(ws_id, default_headers)
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_read_lookup(ws_id: str, cache_bump: int):
+    return read_lookup_for_ws(ws_id, starter_rows=None)
+
 
 # Streamlit rerun compatibility
 def _rerun():
@@ -66,7 +76,9 @@ ws_empty = True
 # Try to read workspace (but don't lock in as df_raw yet)
 if ws_id:
     try:
-        df_ws, meta = read_workspace(ws_id, DEFAULT_HEADERS)
+        ws_ver = st.session_state.get("ws_version", 0)
+        st.session_state.setdefault("cache_bump", 0)
+        df_ws, meta = _cached_read_workspace(ws_id, DEFAULT_HEADERS, ws_ver, st.session_state["cache_bump"])
         ws_loaded = True
         ws_empty = df_ws.dropna(how="all").shape[0] == 0
         st.session_state["ws_version"] = int(meta.get("version", 0))
@@ -182,7 +194,16 @@ if ws_id:
             starter = [{"Level1": x, "Frequency": "monthly", "Factor_per_month": 1.0} for x in starter_levels]
 
     try:
-        df_lookup = read_lookup_for_ws(ws_id, starter_rows=starter)
+        st.session_state.setdefault("cache_bump", 0)
+        # seed once if you want, but cache call uses no starter_rows (to keep cache key simple)
+        if 'df_lookup_seeded' not in st.session_state and starter:
+            try:
+                # Try creating/seed if empty (cheap one-time op)
+                _ = read_lookup_for_ws(ws_id, starter_rows=starter)
+                st.session_state['df_lookup_seeded'] = True
+            except Exception:
+                pass
+        df_lookup = _cached_read_lookup(ws_id, st.session_state["cache_bump"])
     except Exception as e:
         st.warning(f"Could not load lookup for '{ws_id}': {e}")
         df_lookup = pd.DataFrame(columns=LOOKUP_HEADERS)
@@ -330,6 +351,8 @@ if save_btn and can_save:
     except Exception as e:
         st.error(f"Save failed: {e}")
 
+# After successful write (you already set ws_version), add:
+st.session_state["cache_bump"] = st.session_state.get("cache_bump", 0) + 1
 
 # Build a visualization DataFrame from the editor (not saved data)
 viz_df = edited_df.copy()
