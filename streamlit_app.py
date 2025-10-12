@@ -185,7 +185,7 @@ level1_values_all = sorted([str(x) for x in df_raw[l1].dropna().unique().tolist(
 level1_selected = st.sidebar.multiselect("Show only Level 1 values", options=level1_values_all, default=level1_values_all)
 
 # Normalize toggle
-normalize = st.sidebar.checkbox("Normalize to monthly equivalents", value=False,
+normalize = st.sidebar.checkbox("Normalize to monthly equivalents", value=True,
                                 help="Uses per-workspace Frequency factors to convert to monthly.")
 
 st.sidebar.divider()
