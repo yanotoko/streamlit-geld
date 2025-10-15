@@ -329,27 +329,45 @@ if save_btn and can_save:
 # =========================
 st.markdown("### Filters")
 
-# Build Level 1 value list from the mapped L1 column
-if l1 in df_raw.columns:
-    level1_values_all = sorted([str(x) for x in df_raw[l1].dropna().unique().tolist()])
-else:
-    level1_values_all = []
+# Build Level 1 choices from the mapped column
+level1_values_all = sorted([str(x) for x in df_raw[l1].dropna().unique().tolist()]) if l1 in df_raw.columns else []
 
-col_f1, col_f2 = st.columns([2, 1])
+# First row: L1 + Normalize
+col_f1, col_f3 = st.columns([3, 1])
 with col_f1:
     level1_selected = st.multiselect(
-        "Show only Level 1 values",
+        "Filter Level 1 categories",
         options=level1_values_all,
         default=level1_values_all,
-        key="level1_selected_main"
+        key="level1_selected_main",
+        help="Filter the dataset by the mapped Level 1 column."
     )
-with col_f2:
+with col_f3:
     normalize = st.checkbox(
         "Normalize to monthly",
         value=True,
         key="normalize_main",
-        help="Uses per-workspace frequency factors to convert values to monthly equivalents."
+        help="Convert values to monthly equivalents using the per-workspace lookup."
     )
+
+# Compute Level 2 options *based on current Level 1 selection*
+if l1 in df_raw.columns and l2 in df_raw.columns:
+    if level1_selected:  # cascade: limit to rows matching current L1 selection
+        df_for_l2 = df_raw[df_raw[l1].astype(str).isin(level1_selected)]
+    else:
+        df_for_l2 = df_raw
+    level2_values_all = sorted([str(x) for x in df_for_l2[l2].dropna().unique().tolist()])
+else:
+    level2_values_all = []
+
+# Second row: L2
+level2_selected = st.multiselect(
+    "Filter Level 2 categories",
+    options=level2_values_all,
+    default=level2_values_all,
+    key="level2_selected_main"
+)
+
 
 
 # --------------------------
@@ -360,6 +378,10 @@ viz_df = edited_df.copy()
 # Apply Level-1 filter (visualization only)
 if l1 in viz_df.columns and level1_selected:
     viz_df = viz_df[viz_df[l1].astype(str).isin(level1_selected)]
+
+# Apply Level-2 filter (visualization only)
+if l2 in viz_df.columns and 'level2_selected' in locals() and level2_selected:
+    viz_df = viz_df[viz_df[l2].astype(str).isin(level2_selected)]
 
 # Decide which value column to feed the Sankey
 val_to_use = val_col
@@ -381,7 +403,7 @@ else:
 # --------------------------
 # Build & Render Sankey
 # --------------------------
-st.subheader("Income flow")
+st.subheader("Budget")
 try:
     sankey_data = prepare_sankey_data(df_norm, l1=l1, l2=l2, l3=l3, value_col=val_to_use)
 
