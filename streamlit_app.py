@@ -180,13 +180,13 @@ if len({l1, l2, l3}) < 3:
 st.sidebar.divider()
 st.sidebar.header("4) Filter & visualization")
 
-# Level-1 filter
-level1_values_all = sorted([str(x) for x in df_raw[l1].dropna().unique().tolist()]) if l1 in df_raw.columns else []
-level1_selected = st.sidebar.multiselect("Show only Level 1 values", options=level1_values_all, default=level1_values_all)
+# # Level-1 filter
+# level1_values_all = sorted([str(x) for x in df_raw[l1].dropna().unique().tolist()]) if l1 in df_raw.columns else []
+# level1_selected = st.sidebar.multiselect("Show only Level 1 values", options=level1_values_all, default=level1_values_all)
 
-# Normalize toggle
-normalize = st.sidebar.checkbox("Normalize to monthly equivalents", value=True,
-                                help="Uses per-workspace Frequency factors to convert to monthly.")
+# # Normalize toggle
+# normalize = st.sidebar.checkbox("Normalize to monthly equivalents", value=True,
+#                                 help="Uses per-workspace Frequency factors to convert to monthly.")
 
 st.sidebar.divider()
 # Chart choice
@@ -323,6 +323,34 @@ if save_btn and can_save:
                     st.error(f"Could not overwrite: {e}")
     except Exception as e:
         st.error(f"Save failed: {e}")
+
+# =========================
+# Filters (in main body, above chart)
+# =========================
+st.markdown("### Filters")
+
+# Build Level 1 value list from the mapped L1 column
+if l1 in df_raw.columns:
+    level1_values_all = sorted([str(x) for x in df_raw[l1].dropna().unique().tolist()])
+else:
+    level1_values_all = []
+
+col_f1, col_f2 = st.columns([2, 1])
+with col_f1:
+    level1_selected = st.multiselect(
+        "Show only Level 1 values",
+        options=level1_values_all,
+        default=level1_values_all,
+        key="level1_selected_main"
+    )
+with col_f2:
+    normalize = st.checkbox(
+        "Normalize to monthly",
+        value=True,
+        key="normalize_main",
+        help="Uses per-workspace frequency factors to convert values to monthly equivalents."
+    )
+
 
 # --------------------------
 # Build visualization dataframe (filter + normalization)
