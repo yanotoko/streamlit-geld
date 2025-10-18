@@ -16,7 +16,7 @@ def prepare_sankey_data(
     required = [l1, l2, l3, value_col]
     if l4:
         required.append(l4)
-        missing = [c for c in required if c not in df.columns]
+    missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
@@ -24,7 +24,7 @@ def prepare_sankey_data(
     norm_cols = [l1, l2, l3] + ([l4] if l4 else [])
     for col in norm_cols:
         df[col] = df[col].astype(str).str.strip().fillna("Unknown")
-        df[value_col] = pd.to_numeric(df[value_col], errors="coerce").fillna(0)
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce").fillna(0)
 
     # Aggregate to avoid duplicate links
     g12 = df.groupby([l1, l2], as_index=False)[value_col].sum()
