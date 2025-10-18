@@ -175,13 +175,10 @@ l3 = st.sidebar.selectbox("Level 3", all_cols, index=all_cols.index(guess(all_co
 # Optional Level 4
 none_l4_label = "— None —"
 l4_options = [none_l4_label] + all_cols
-l4_choice = st.sidebar.selectbox(
-    "Level 4 (optional)",
-    l4_options,
-    index=0,
-    help="Fourth level (optional). Leave as None to use 3 levels."
-    )
+l4_choice = st.sidebar.selectbox("Level 4 (optional)",l4_options,index=0,
+    help="Fourth level (optional). Leave as None to use 3 levels.")
 l4 = None if l4_choice == none_l4_label else l4_choice
+
 val_col = st.sidebar.selectbox("Value (numeric)", all_cols, index=all_cols.index(guess(all_cols, ["Amount","Value","Count"])) if all_cols else 0)
 
 chosen_levels = [l1, l2, l3] + ([l4] if l4 else [])
@@ -191,14 +188,6 @@ if len(set(chosen_levels)) < len(chosen_levels):
 # 4) FILTER & VISUALIZATION
 st.sidebar.divider()
 st.sidebar.header("4) Filter & visualization")
-
-# # Level-1 filter
-# level1_values_all = sorted([str(x) for x in df_raw[l1].dropna().unique().tolist()]) if l1 in df_raw.columns else []
-# level1_selected = st.sidebar.multiselect("Show only Level 1 values", options=level1_values_all, default=level1_values_all)
-
-# # Normalize toggle
-# normalize = st.sidebar.checkbox("Normalize to monthly equivalents", value=True,
-#                                 help="Uses per-workspace Frequency factors to convert to monthly.")
 
 st.sidebar.divider()
 # Chart choice
