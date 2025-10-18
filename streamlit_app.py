@@ -171,10 +171,22 @@ l2 = st.sidebar.selectbox("Level 2", all_cols, index=all_cols.index(guess(all_co
                           help="Second level (e.g., Category)")
 l3 = st.sidebar.selectbox("Level 3", all_cols, index=all_cols.index(guess(all_cols, ["Subcategory","Category"])) if all_cols else 0,
                           help="Third level (e.g., Bank Account)")
+
+# Optional Level 4
+none_l4_label = "— None —"
+l4_options = [none_l4_label] + all_cols
+l4_choice = st.sidebar.selectbox(
+    "Level 4 (optional)",
+    l4_options,
+    index=0,
+    help="Fourth level (optional). Leave as None to use 3 levels."
+    )
+l4 = None if l4_choice == none_l4_label else l4_choice
 val_col = st.sidebar.selectbox("Value (numeric)", all_cols, index=all_cols.index(guess(all_cols, ["Amount","Value","Count"])) if all_cols else 0)
 
-if len({l1, l2, l3}) < 3:
-    st.sidebar.warning("Each level should be a different column.")
+chosen_levels = [l1, l2, l3] + ([l4] if l4 else [])
+if len(set(chosen_levels)) < len(chosen_levels):
+    st.sidebar.warning("Each selected level should be a different column.")
 
 # 4) FILTER & VISUALIZATION
 st.sidebar.divider()
@@ -405,23 +417,24 @@ else:
 # --------------------------
 st.subheader("Budget")
 try:
-    sankey_data = prepare_sankey_data(df_norm, l1=l1, l2=l2, l3=l3, value_col=val_to_use)
+    sankey_data = prepare_sankey_data(df_norm, l1=l1, l2=l2, l3=l3, value_col=val_to_use, l4=l4)
 
     # Ensure ECharts knobs have safe defaults if user picked Plotly
     if chart_type.startswith("Sankey (ECharts") and "ech_curveness" not in locals():
         ech_curveness, ech_edge_font = 0.5, 11
 
+    title_str = f"{l1} \u2192 {l2} \u2192 {l3}" + (f" \u2192 {l4}" if l4 else "")
     if chart_type == "Sankey (Plotly)":
         fig = make_sankey_figure(
             sankey_data,
-            title=f"{l1} \u2192 {l2} \u2192 {l3}"
+            title=title_str
         )
         st.plotly_chart(fig, use_container_width=True)
 
     elif chart_type == "Sankey (ECharts, labels always on)":
         options = make_echarts_sankey_options(
             sankey_data,
-            title=f"{l1} \u2192 {l2} \u2192 {l3}",
+            title=title_str,
             value_suffix=" $",        # optional
             curveness=ech_curveness,
             edge_font_size=int(ech_edge_font),
