@@ -4,6 +4,9 @@ from typing import IO, Union, List, Optional, Tuple
 from pathlib import Path
 import pandas as pd
 
+from io import BytesIO
+import hashlib
+
 def read_csv_any(file_or_buffer: Union[str, IO[bytes], IO[str]], **kwargs) -> pd.DataFrame:
     """
     Read CSV from path/handle with graceful fallbacks for common delimiters/decimals.
@@ -61,3 +64,70 @@ def validate_upload(
         errs.append(f"File too large ({size/1_000_000:.1f} MB). Max {max_bytes/1_000_000:.1f} MB.")
 
     return (len(errs) == 0), " ".join(errs)
+
+
+# Transaction io
+def _tx_norm_amount(x):
+    v = pd.to_numeric(x, errors="coerce")
+    if pd.isna(v):
+        return 0.0
+    # Treat negative as expense; make positive magnitude
+    return abs(float(v))
+
+def _tx_make_id(row: pd.Series) -> str:
+    base = f"{row.get('Date','')}|{row.get('Description','')}|{row.get('Merchant','')}|{row.get('Account','')}|{row.get('Amount','')}"
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
+
+def read_transactions_file(file_like, mapping: dict) -> pd.DataFrame:
+    """
+    mapping keys: Date, Description, Merchant (opt), Account, Amount
+    Returns normalized DF with TX_HEADERS + TX_ID & Source='upload'
+    """
+    raw = file_like.getvalue() if hasattr(file_like, "getvalue") else file_like.read()
+    bio = BytesIO(raw)
+
+    # Try Excel first, then CSV (fallbacks)
+    try:
+        df = pd.read_excel(bio)
+    except Exception:
+        bio.seek(0)
+        try:
+            df = pd.read_csv(bio)
+        except Exception:
+            bio.seek(0)
+            df = pd.read_csv(bio, sep=";", decimal=",")
+
+    # Map columns
+    col_map = {
+        "Date": mapping.get("Date"),
+        "Description": mapping.get("Description"),
+        "Merchant": mapping.get("Merchant"),  # may be None
+        "Account": mapping.get("Account"),
+        "Amount": mapping.get("Amount"),
+    }
+    missing = [k for k, src in col_map.items() if k != "Merchant" and (src is None or src not in df.columns)]
+    if missing:
+        raise ValueError(f"Missing required columns in upload: {', '.join(missing)}")
+
+    out = pd.DataFrame()
+    for k, src in col_map.items():
+        if src and src in df.columns:
+            out[k] = df[src]
+        else:
+            out[k] = ""
+
+    # Normalize types
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce").dt.date.astype(str)
+    out["Description"] = out["Description"].astype(str).str.strip()
+    out["Merchant"] = out["Merchant"].astype(str).str.strip()
+    out["Account"] = out["Account"].astype(str).str.strip()
+    out["Amount"] = out["Amount"].apply(_tx_norm_amount)
+
+    # Defaults
+    out["AssignedCategory"] = ""
+    out["Source"] = "upload"
+    out["TX_ID"] = out.apply(_tx_make_id, axis=1)
+
+    # Keep canonical order
+    cols = ["Date","Description","Merchant","Account","Amount","AssignedCategory","Source","TX_ID"]
+    return out[cols]

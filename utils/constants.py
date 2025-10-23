@@ -29,3 +29,7 @@ LOOKUP_HEADERS = ["Level1", "Frequency", "Factor_per_month"]
 
 # Optional: allowed frequency values (for UI validation/help text)
 FREQUENCY_CHOICES = ["weekly", "biweekly", "semimonthly", "monthly", "quarterly", "yearly"]
+
+# Transaction sheets
+TX_SHEET_PREFIX = "Transactions"
+MERCHANTS_SHEET_PREFIX = "Merchants"
