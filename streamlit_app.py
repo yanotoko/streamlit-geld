@@ -1197,11 +1197,13 @@ else:
             id_vars=["Category"], value_vars=["Budget", "Actuals"],
             var_name="Type", value_name="Value"
         )
+        color_map = {'Budget':'rgba(136, 204, 238,0.7)','Actuals':'rgba(239, 85, 59, 0.7)'}
         fig_bar = px.bar(
             melt,
             x="Value",
             y="Category",
             color="Type",
+            color_discrete_map=color_map,
             barmode="group",
             orientation="h",
             title=f"Budget vs Actuals — {period_selected}",
@@ -1210,6 +1212,139 @@ else:
         st.plotly_chart(fig_bar, use_container_width=True)
     except Exception as e:
         st.warning(f"Could not render Plotly bar chart: {e}")
+
+# ---------------------------------------------------------
+# Payments by Account (route Actuals to budgeted bank accounts)
+# ---------------------------------------------------------
+st.markdown("### Payments by Account")
+
+# Resolve Category Universe col (from session or saved)
+cu_selected = st.session_state.get("cat_universe_col")
+if not cu_selected and ws_id:
+    try:
+        cu_selected = read_category_universe(ws_id)
+    except Exception:
+        cu_selected = None
+
+if not cu_selected or cu_selected not in edited_df.columns:
+    st.warning("Category Universe column is not set or not found in the workbook, so we can’t map categories to accounts.")
+else:
+    # Resolve the budget 'account' column (prefer l3; fallback to a likely name)
+    if l3 in edited_df.columns:
+        budget_acct_col = l3
+    else:
+        # fallback guesses
+        for guess in ["Bank Account", "Account", "Destination"]:
+            if guess in edited_df.columns:
+                budget_acct_col = guess
+                break
+        else:
+            st.warning("Could not find a bank account column in the workbook. Set Level 3 (e.g., Bank Account) in the mapping.")
+            budget_acct_col = None
+
+    # Controls for normalization and zeros (independent of the earlier chart’s toggles)
+    cpa1, cpa2 = st.columns([1, 1])
+    with cpa1:
+        normalize_for_routing = st.checkbox(
+            "Normalize budget to monthly for routing",
+            value=True,
+            help="Use the workspace lookup (Level1 → Factor_per_month) to choose the dominant account per category."
+        )
+    with cpa2:
+        hide_zero_payments = st.checkbox(
+            "Hide zero-amount accounts",
+            value=True
+        )
+
+    # Build ACTUALS for the chosen period (by AssignedCategory) — we already computed df_period above
+    actuals_cat = (
+        df_period.copy()
+        .assign(Amount=pd.to_numeric(df_period["Amount"], errors="coerce").fillna(0))
+        .groupby("AssignedCategory", as_index=False)["Amount"]
+        .sum()
+        .rename(columns={"AssignedCategory": "Category", "Amount": "Actuals"})
+    )
+
+    if budget_acct_col:
+        # Build a mapping Category -> Account using the workbook (edited_df)
+        budget_map_base = edited_df.copy()
+
+        # numeric budget value
+        budget_map_base["_val"] = pd.to_numeric(budget_map_base[val_col], errors="coerce").fillna(0)
+
+        # optional monthly normalization (uses Level1 lookup if available)
+        use_lookup = bool(ws_id) and (l1 in budget_map_base.columns) and (not df_lookup.empty)
+        if normalize_for_routing and use_lookup:
+            bnorm = budget_map_base.merge(
+                df_lookup[["Level1", "Factor_per_month"]],
+                how="left",
+                left_on=l1,
+                right_on="Level1"
+            )
+            bnorm["Factor_per_month"] = pd.to_numeric(bnorm["Factor_per_month"], errors="coerce").fillna(1.0)
+            bnorm["_val_monthly"] = bnorm["_val"] * bnorm["Factor_per_month"]
+            route_val_col = "_val_monthly"
+            map_src = bnorm
+        else:
+            route_val_col = "_val"
+            map_src = budget_map_base
+
+        # If either of the mapping columns don’t exist, bail gracefully
+        if cu_selected not in map_src.columns or budget_acct_col not in map_src.columns:
+            st.warning("Workbook doesn’t contain the expected Category Universe and Account columns to map payments.")
+        else:
+            # Aggregate budget by (Category, Account)
+            pair = (
+                map_src.groupby([cu_selected, budget_acct_col], as_index=False)[route_val_col]
+                .sum()
+                .rename(columns={cu_selected: "Category", budget_acct_col: "Account", route_val_col: "BudgetValue"})
+            )
+
+            if pair.empty:
+                st.info("No budget data available to determine category→account mapping.")
+            else:
+                # Pick the dominant Account per Category: the account with max BudgetValue
+                pair_sorted = pair.sort_values(["Category", "BudgetValue"], ascending=[True, False])
+                dominant = pair_sorted.drop_duplicates(subset=["Category"], keep="first")[["Category", "Account"]]
+
+                # Join actuals to the dominant account per category
+                routed = actuals_cat.merge(dominant, on="Category", how="left")
+                routed["Account"] = routed["Account"].fillna("Unmapped")
+
+                # Aggregate payments per account
+                payments = (
+                    routed.groupby("Account", as_index=False)["Actuals"]
+                    .sum()
+                    .rename(columns={"Actuals": "To Pay"})
+                )
+
+                if hide_zero_payments:
+                    payments = payments[payments["To Pay"] != 0]
+
+                # Friendly sort
+                if not payments.empty:
+                    payments = payments.sort_values("To Pay", ascending=False)
+
+                st.dataframe(payments, use_container_width=True)
+
+                # Optional: show a detail table Category → Account → Actuals used
+                with st.expander("See routing details (Category → Account → Actuals)", expanded=False):
+                    detail = routed.rename(columns={"Actuals": "Amount"})
+                    if hide_zero_payments:
+                        detail = detail[detail["Amount"] != 0]
+                    detail = detail.sort_values(["Account", "Amount"], ascending=[True, False])
+                    st.dataframe(detail, use_container_width=True)
+
+                # Download the payments table
+                dl = payments.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download payments CSV",
+                    data=dl,
+                    file_name=f"payments_{period_selected}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
 
 # =========================
 # Merchant memory (rules) — view / edit
