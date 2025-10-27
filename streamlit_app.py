@@ -74,14 +74,65 @@ def _rerun():
         st.experimental_rerun()
 
 st.set_page_config(page_title="Budget App", layout="wide")
-st.title("Budget App")
+st.title("💰 Budget App")
+# =============== UI Helpers (icons, headers, spacing) + Theme ===============
+THEME_BASE = (st.get_option("theme.base") or "light").lower()
+IS_DARK = THEME_BASE == "dark"
+PLOTLY_TEMPLATE = "plotly_dark" if IS_DARK else "plotly_white"
+ECHR_THEME = "dark" if IS_DARK else "light"
+
+# CSS that reads Streamlit theme variables (works in light & dark)
+st.markdown("""
+<style>
+:root {
+  --hdr-color: var(--text-color);
+  --cap-color: var(--secondary-text-color);
+  --chip-bg: var(--secondary-background-color);
+  --chip-fg: var(--primary-color);
+  --chip-border: var(--primary-color);
+}
+
+.h2-line {
+  display:flex; align-items:center; gap:.6rem;
+  font-weight:700; font-size:1.25rem; color: var(--hdr-color);
+  margin: 8px 0 2px 0;
+}
+.h2-cap {
+  font-size:.95rem; color: var(--cap-color); margin: 0 0 6px 0;
+}
+.sb-h {
+  font-weight:700; font-size:1.0rem; color: var(--hdr-color);
+  margin: 4px 0 8px 0; display:flex; gap:.5rem; align-items:center;
+}
+.tag {
+  display:inline-block; padding:.25rem .55rem; border-radius:999px;
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+  border: 1px solid var(--chip-border);
+  font-weight:600; font-size:.85rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
+def section_header(icon: str, title: str, caption: str | None = None):
+    st.divider()
+    st.markdown(f'<div class="h2-line">{icon} {title}</div>', unsafe_allow_html=True)
+    if caption:
+        st.markdown(f'<div class="h2-cap">{caption}</div>', unsafe_allow_html=True)
+
+def sidebar_header(icon: str, title: str):
+    st.sidebar.markdown(f'<div class="sb-h">{icon} {title}</div>', unsafe_allow_html=True)
+
+def badge(text: str):
+    st.markdown(f'<span class="tag">{text}</span>', unsafe_allow_html=True)
+
 
 # =======================================================================================
 # SIDEBAR (workspace, transactions upload, data source)
 # =======================================================================================
 
 # 1) WORKSPACE
-st.sidebar.header("1) Workspace")
+sidebar_header("🧭", "1) Workspace")
 with st.sidebar.form(key="ws_form", clear_on_submit=False):
     ws_input = st.text_input(
         "Workspace ID",
@@ -98,7 +149,8 @@ st.session_state.setdefault("cache_bump", 0)
 
 # 2) TRANSACTIONS UPLOAD (moved here, right after Workspace)
 st.sidebar.divider()
-st.sidebar.header("2) Transactions upload")
+sidebar_header("🧾", "2) Transactions upload")
+
 tx_file_sb = st.sidebar.file_uploader(
     "Upload transactions (CSV/XLSX)",
     type=["csv","xlsx","xls","xlsm"],
@@ -109,7 +161,7 @@ if tx_file_sb is not None:
 
 # 3) DATA SOURCE (workbook)
 st.sidebar.divider()
-st.sidebar.header("3) Budget workbook")
+sidebar_header("📒", "3) Budget workbook")
 st.sidebar.caption("Load from a workspace or upload a file. You can import an upload into your workspace.")
 
 uploaded = st.sidebar.file_uploader("Upload CSV or Excel", type=[ext.lstrip(".") for ext in ALLOWED_EXTS], key="budget_upload")
@@ -249,7 +301,7 @@ st.session_state.setdefault("ws_lookup_df", pd.DataFrame(columns=LOOKUP_HEADERS)
 
 # 4) MAP COLUMNS
 st.sidebar.divider()
-st.sidebar.header("4) Map columns")
+sidebar_header("🗺️", "4) Map columns")
 all_cols = list(df_raw.columns)
 
 def guess(col_names, candidates):
@@ -315,7 +367,7 @@ with cu_cols[1]:
 
 # 4) FILTER & VISUALIZATION
 st.sidebar.divider()
-st.sidebar.header("4) Sankey Chart Setup")
+sidebar_header("🪢", "Sankey chart setup")
 with st.sidebar.expander("Sankey Chart Options", expanded=False):
     chart_type = st.selectbox("Chart type", ["Sankey (Plotly)", "Sankey (ECharts, labels always on)"], index=1)
     if chart_type.startswith("Sankey (ECharts"):
@@ -348,7 +400,7 @@ else:
     df_lookup = pd.DataFrame(columns=LOOKUP_HEADERS)
 
 # Optional: edit per-workspace lookup in sidebar
-st.sidebar.header("4b) Frequency Lookup (per workspace)")
+sidebar_header("⏱️", "Frequency lookup (workspace)")
 with st.sidebar.expander("View/Edit Lookup", expanded=False):
     st.caption("Maps Level 1 values to Frequency and a monthly factor (workspace-specific).")
     df_lookup_edit = st.data_editor(
@@ -380,15 +432,14 @@ with st.sidebar.expander("View/Edit Lookup", expanded=False):
 # =======================================================================================
 # MAIN TABS
 # =======================================================================================
-tab_setup, tab_overview, tab_settings = st.tabs(["Initialize", "Summary", "Settings"])
+tab_setup, tab_overview, tab_settings = st.tabs(["🧭 Initialize", "📊 Summary", "⚙️ Settings"])
 
 with tab_setup:
     # -----------------------------------
     # Budget table (editable) + preview filter
     # -----------------------------------
     st.divider()
-    st.subheader("Budget table")
-    st.caption(f"Source: **{source_name}**")
+    section_header("📦", "Budget table", f"Source: {source_name}")
 
     with st.expander("Filter rows (Budget)", expanded=False):
         q_budget = st.text_input("Search text (all columns)", key="q_budget").strip().lower()
@@ -470,7 +521,7 @@ with tab_setup:
     # =========================
     # Filters (Overview-only state keys)
     # =========================
-    st.markdown("### Filters")
+    section_header("🔎", "Filters")
 
     # ---------- NEW: use snapshots captured earlier ----------
     budget_df = st.session_state.get("ws_budget_df", df_raw.copy())
@@ -550,7 +601,7 @@ with tab_setup:
     # Budget Sankey (after table) — respects Overview filters & snapshots
     # -----------------------------------
     st.divider()
-    st.subheader("Budget flow (Sankey)")
+    section_header("🪢", "Budget flow (Sankey)")
 
     viz_df = budget_df.copy()
     if l1 in viz_df.columns and level1_selected:
@@ -581,6 +632,7 @@ with tab_setup:
             st.info("No flows to display for the current filters.")
         elif chart_type == "Sankey (Plotly)":
             fig = make_sankey_figure(sankey_data, title=f"{l1} \u2192 {l2} \u2192 {l3}" + (f" \u2192 {l4}" if l4 else ""))
+            fig.update_layout(template=PLOTLY_TEMPLATE)
             st.plotly_chart(fig, use_container_width=True)
         else:
             if chart_type.startswith("Sankey (ECharts") and "ech_curveness" not in locals():
@@ -593,7 +645,7 @@ with tab_setup:
                 edge_font_size=int(ech_edge_font),
                 py_value_format=",.0f",
             )
-            st_echarts(options=options, height="600px")
+            st_echarts(options=options, height="600px",theme=ECHR_THEME)
     except Exception as e:
         st.error(f"Could not render chart: {e}")
 
@@ -601,8 +653,7 @@ with tab_setup:
     # Transactions (map & classify) — uploader is in sidebar
     # -----------------------------------
     st.divider()
-    st.divider()
-    st.subheader("Transactions classify")
+    section_header("📥", "Transactions — classify & stage")
 
     tx_col1, tx_col2 = st.columns([2, 1])
 
@@ -771,8 +822,7 @@ with tab_setup:
     # -----------------------------------
     if "tx_staged" in st.session_state:
         st.divider()
-        st.divider()
-        st.subheader("Transactions table")
+        section_header("📋", "Transactions table")
 
         base_df = st.session_state["tx_staged"].copy()
         universe = st.session_state.get("tx_universe", [])
@@ -1053,7 +1103,7 @@ with tab_setup:
     # Actuals (Transactions) Sankey — Expense -> AssignedCategory -> Merchant
     # =========================
     if tx_df is not None and not pd.DataFrame(tx_df).empty:
-        st.subheader("Actuals (Transactions)")
+        section_header("💳", "Actuals flow (Sankey)")
         try:
             df_tx_show = tx_df.copy()
             df_tx_show["Amount"] = pd.to_numeric(df_tx_show.get("Amount", 0), errors="coerce").fillna(0)
@@ -1091,6 +1141,7 @@ with tab_setup:
                 title_tx = "Expense \u2192 AssignedCategory \u2192 Period"
                 if chart_type == "Sankey (Plotly)":
                     fig_tx = make_sankey_figure(sankey_tx, title=title_tx)
+                    fig_tx.update_layout(template=PLOTLY_TEMPLATE)
                     st.plotly_chart(fig_tx, use_container_width=True)
                 else:
                     if chart_type.startswith("Sankey (ECharts") and "ech_curveness" not in locals():
@@ -1103,208 +1154,18 @@ with tab_setup:
                         edge_font_size=int(ech_edge_font),
                         py_value_format=",.0f",
                     )
-                    st_echarts(opts_tx, height="600px")
+                    st_echarts(opts_tx, height="600px",theme=ECHR_THEME)
 
         except Exception as e:
             st.error(f"Could not render Actuals Sankey: {e}")
 
 with tab_overview:
 
-    # # =========================
-    # # Filters (Overview-only state keys)
-    # # =========================
-    # st.markdown("### Filters")
-
-    # # ---------- NEW: use snapshots captured earlier ----------
-    # budget_df = st.session_state.get("ws_budget_df", df_raw.copy())
-    # tx_df     = st.session_state.get("ws_tx_df", st.session_state.get("tx_staged", pd.DataFrame()))
-    # lookup_df = st.session_state.get("ws_lookup_df", pd.DataFrame(columns=LOOKUP_HEADERS))
-    # cu_col    = st.session_state.get("cu_col_saved") or st.session_state.get("cat_universe_col")
-    # # ---------------------------------------------------------
-
-    # OV_L1_KEY   = "ov_level1_selected"
-    # OV_L2_KEY   = "ov_level2_selected"
-    # OV_NORM_KEY = "ov_normalize"
-
-    # level1_values_all = sorted(budget_df[l1].dropna().astype(str).unique().tolist()) if l1 in budget_df.columns else []
-
-    # l1_signature = (l1, tuple(level1_values_all))
-    # prev_l1_signature = st.session_state.get("__ov_l1_signature")
-    # if (OV_L1_KEY not in st.session_state) or (prev_l1_signature != l1_signature):
-    #     st.session_state["__ov_l1_signature"] = l1_signature
-    #     st.session_state[OV_L1_KEY] = level1_values_all
-
-    # preset_l1 = st.session_state.get(OV_L1_KEY, level1_values_all)
-    # preset_l1 = [val for val in preset_l1 if val in level1_values_all]
-    # if not preset_l1 and level1_values_all:
-    #     preset_l1 = level1_values_all
-    #     st.session_state[OV_L1_KEY] = preset_l1
-
-    # col_f1, col_f3 = st.columns([3, 1])
-    # with col_f1:
-    #     level1_selected = st.multiselect(
-    #         "Filter Level 1 categories",
-    #         options=level1_values_all,
-    #         default=preset_l1,
-    #         key=OV_L1_KEY,
-    #         help="Filter the dataset by the mapped Level 1 column."
-    #     )
-    #     level1_selected = [val for val in st.session_state.get(OV_L1_KEY, []) if val in level1_values_all]
-    #     if not level1_selected and level1_values_all:
-    #         level1_selected = level1_values_all
-
-    # with col_f3:
-    #     normalize_for_sankey = st.checkbox(
-    #         "Normalize to monthly",
-    #         value=True,
-    #         key=OV_NORM_KEY,
-    #         help="Convert values to monthly equivalents using the per-workspace lookup."
-    #     )
-
-    # if l1 in budget_df.columns and l2 in budget_df.columns:
-    #     df_for_l2 = budget_df[budget_df[l1].astype(str).isin(level1_selected)] if level1_selected else budget_df
-    #     level2_values_all = sorted(df_for_l2[l2].dropna().astype(str).unique().tolist())
-    # else:
-    #     level2_values_all = []
-
-    # l2_signature = (l1, l2, tuple(level2_values_all))
-    # prev_l2_signature = st.session_state.get("__ov_l2_signature")
-    # if (OV_L2_KEY not in st.session_state) or (prev_l2_signature != l2_signature):
-    #     st.session_state["__ov_l2_signature"] = l2_signature
-    #     st.session_state[OV_L2_KEY] = level2_values_all
-
-    # preset_l2 = st.session_state.get(OV_L2_KEY, level2_values_all)
-    # preset_l2 = [val for val in preset_l2 if val in level2_values_all]
-    # if not preset_l2 and level2_values_all:
-    #     preset_l2 = level2_values_all
-    #     st.session_state[OV_L2_KEY] = preset_l2
-
-    # level2_selected = st.multiselect(
-    #     "Filter Level 2 categories",
-    #     options=level2_values_all,
-    #     default=preset_l2,
-    #     key=OV_L2_KEY
-    # )
-    # level2_selected = [val for val in st.session_state.get(OV_L2_KEY, []) if val in level2_values_all]
-    # if not level2_selected and level2_values_all:
-    #     level2_selected = level2_values_all
-
-    # # -----------------------------------
-    # # Budget Sankey (after table) — respects Overview filters & snapshots
-    # # -----------------------------------
-    # st.divider()
-    # st.subheader("Budget flow (Sankey)")
-
-    # viz_df = budget_df.copy()
-    # if l1 in viz_df.columns and level1_selected:
-    #     viz_df = viz_df[viz_df[l1].astype(str).isin(level1_selected)]
-    # if l2 in viz_df.columns and level2_selected:
-    #     viz_df = viz_df[viz_df[l2].astype(str).isin(level2_selected)]
-
-    # val_to_use = val_col
-    # use_lookup_snap = not lookup_df.empty and (l1 in viz_df.columns)
-
-    # if normalize_for_sankey and use_lookup_snap:
-    #     df_norm = viz_df.merge(
-    #         lookup_df[["Level1", "Factor_per_month"]],
-    #         how="left",
-    #         left_on=l1,
-    #         right_on="Level1"
-    #     )
-    #     df_norm["Factor_per_month"] = pd.to_numeric(df_norm["Factor_per_month"], errors="coerce").fillna(1.0)
-    #     df_norm["_AmountMonthly"] = pd.to_numeric(df_norm[val_col], errors="coerce").fillna(0) * df_norm["Factor_per_month"]
-    #     val_to_use = "_AmountMonthly"
-    # else:
-    #     df_norm = viz_df.copy()
-
-    # try:
-    #     sankey_data = prepare_sankey_data(df_norm, l1=l1, l2=l2, l3=l3, value_col=val_to_use, l4=l4)
-
-    #     if not sankey_data["sources"]:
-    #         st.info("No flows to display for the current filters.")
-    #     elif chart_type == "Sankey (Plotly)":
-    #         fig = make_sankey_figure(sankey_data, title=f"{l1} \u2192 {l2} \u2192 {l3}" + (f" \u2192 {l4}" if l4 else ""))
-    #         st.plotly_chart(fig, use_container_width=True)
-    #     else:
-    #         if chart_type.startswith("Sankey (ECharts") and "ech_curveness" not in locals():
-    #             ech_curveness, ech_edge_font = 0.5, 11
-    #         options = make_echarts_sankey_options(
-    #             sankey_data,
-    #             title=f"{l1} \u2192 {l2} \u2192 {l3}" + (f" \u2192 {l4}" if l4 else ""),
-    #             value_suffix=" $",
-    #             curveness=ech_curveness,
-    #             edge_font_size=int(ech_edge_font),
-    #             py_value_format=",.0f",
-    #         )
-    #         st_echarts(options=options, height="600px")
-    # except Exception as e:
-    #     st.error(f"Could not render chart: {e}")
-
-    # # =========================
-    # # Actuals (Transactions) Sankey — Expense -> AssignedCategory -> Merchant
-    # # =========================
-    # if tx_df is not None and not pd.DataFrame(tx_df).empty:
-    #     st.subheader("Actuals (Transactions)")
-    #     try:
-    #         df_tx_show = tx_df.copy()
-    #         df_tx_show["Amount"] = pd.to_numeric(df_tx_show.get("Amount", 0), errors="coerce").fillna(0)
-
-    #         if "AssignedCategory" not in df_tx_show.columns:
-    #             df_tx_show["AssignedCategory"] = "Uncategorized"
-    #         else:
-    #             df_tx_show["AssignedCategory"] = df_tx_show["AssignedCategory"].astype(str).str.strip().replace({"": "Uncategorized"})
-
-    #         # Find a Merchant-like column (do NOT use 'Period' as a candidate)
-    #         merchant_col = None
-    #         for cand in ["Merchant", "Payee", "Vendor", "Description"]:
-    #             if cand in df_tx_show.columns:
-    #                 merchant_col = cand
-    #                 break
-
-    #         if merchant_col is None:
-    #             st.warning("Could not find a Merchant/Payee/Vendor/Description column — cannot render Actuals Sankey.")
-    #         else:
-    #             df_tx_show["L1_actual"] = "Expense"
-
-    #             sankey_tx = prepare_sankey_data(
-    #                 df_tx_show.rename(columns={
-    #                     "L1_actual": "L1_actual",
-    #                     "AssignedCategory": "AssignedCategory",
-    #                     merchant_col: "Merchant",
-    #                     "Amount": "Amount",
-    #                 }),
-    #                 l1="L1_actual",
-    #                 l2="AssignedCategory",
-    #                 l3="Merchant",
-    #                 value_col="Amount",
-    #             )
-
-    #             title_tx = "Expense \u2192 AssignedCategory \u2192 Merchant"
-    #             if chart_type == "Sankey (Plotly)":
-    #                 fig_tx = make_sankey_figure(sankey_tx, title=title_tx)
-    #                 st.plotly_chart(fig_tx, use_container_width=True)
-    #             else:
-    #                 if chart_type.startswith("Sankey (ECharts") and "ech_curveness" not in locals():
-    #                     ech_curveness, ech_edge_font = 0.5, 11
-    #                 opts_tx = make_echarts_sankey_options(
-    #                     sankey_tx,
-    #                     title=title_tx,
-    #                     value_suffix=" $",
-    #                     curveness=ech_curveness,
-    #                     edge_font_size=int(ech_edge_font),
-    #                     py_value_format=",.0f",
-    #                 )
-    #                 st_echarts(opts_tx, height="600px")
-
-    #     except Exception as e:
-    #         st.error(f"Could not render Actuals Sankey: {e}")
-
     # -----------------------------------
     # Period Summary + Budget vs Actuals + Payments
     # -----------------------------------
     st.divider()
-    st.divider()
-    st.subheader("Period summary (Actuals)")
+    section_header("🗓️", "Period summary (Actuals)")
 
     df_tx_summary_src = tx_df.copy() if tx_df is not None else pd.DataFrame()
     if df_tx_summary_src is None or df_tx_summary_src.empty:
@@ -1342,6 +1203,55 @@ with tab_overview:
                 show_zero_rows = st.checkbox("Show categories with zero total", value=False)
 
             df_period = df_tx_sum[df_tx_sum["Period"] == period_selected].copy()
+                    
+        # --- Summary cards (Total spend • # Transactions • % Categorized) ---
+        # Uses the currently selected period (df_period)
+        st.caption("Category totals for selected period")
+        try:
+            # Safe numeric
+            df_period["Amount"] = pd.to_numeric(df_period.get("Amount", 0), errors="coerce").fillna(0)
+
+            # Totals
+            total_spend = float(df_period["Amount"].sum())
+            tx_count = int(len(df_period))
+
+            # % categorized (non-empty & not 'Uncategorized')
+            cat_col = df_period.get("AssignedCategory")
+            if cat_col is None:
+                pct_categorized = 0.0
+            else:
+                cat_clean = cat_col.astype(str).str.strip().str.lower()
+                is_categorized = (cat_clean != "") & (cat_clean != "uncategorized")
+                pct_categorized = (is_categorized.mean() * 100.0) if tx_count > 0 else 0.0
+
+            # Small helper to render a clean card
+            def _card(col, icon, label, value_str):
+                col.markdown(
+                    f"""
+                    <div style="
+                        padding:14px 16px;
+                        border-radius:16px;
+                        background:#f8fafc;
+                        border:1px solid #e2e8f0;
+                    ">
+                    <div style="font-size:14px;color:#64748b;display:flex;gap:.5rem;align-items:center;">
+                        <span style="font-size:18px;">{icon}</span>
+                        <span>{label}</span>
+                    </div>
+                    <div style="font-size:28px;font-weight:700;margin-top:6px;color:#0f172a;">
+                        {value_str}
+                    </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            c1, c2, c3 = st.columns(3)
+            _card(c1, "💸", "Total spend", f"${total_spend:,.0f}")
+            _card(c2, "🧾", "Transactions", f"{tx_count:,}")
+            _card(c3, "✅", "Categorized", f"{pct_categorized:,.0f}%")
+        except Exception as _cards_err:
+            st.caption(f"Summary cards unavailable for this period: {_cards_err}")
 
             summary = (
                 df_period
@@ -1375,7 +1285,7 @@ with tab_overview:
             )
 
     # Budget vs Actuals bar chart
-    st.markdown("### Budget vs Actuals (by category)")
+    section_header("📈", "Budget vs Actuals (by category)")
     cu_selected = st.session_state.get("cat_universe_col") or st.session_state.get("cu_col_saved")
     if not cu_selected or cu_selected not in budget_df.columns:
         st.warning("Category Universe column is not set or not found in the workbook. Save it in the sidebar first.")
@@ -1463,6 +1373,7 @@ with tab_overview:
                 title=f"Budget vs Actuals — {locals().get('period_selected','(no period)')}",
             )
             fig_bar.update_layout(margin=dict(l=10, r=10, t=40, b=10), legend_title_text="", height=500)
+            fig_bar.update_layout(template=PLOTLY_TEMPLATE)
             st.plotly_chart(fig_bar, use_container_width=True)
         except Exception as e:
             st.warning(f"Could not render Plotly bar chart: {e}")
@@ -1470,7 +1381,7 @@ with tab_overview:
     # ---------------------------------------------------------
     # Payments by Account (route Actuals to budgeted bank accounts)
     # ---------------------------------------------------------
-    st.markdown("### Payments by Account")
+    section_header("🏦", "Payments by account")
 
     def _find_account_column(df: pd.DataFrame) -> str | None:
         """
@@ -1616,7 +1527,7 @@ with tab_settings:
     # =========================
     # Settings: Manage saved transactions (moved here)
     # =========================
-    st.subheader("Manage saved transactions")
+    section_header("🧹", "Manage saved transactions")
     if not ws_id:
         st.info("Enter a Workspace ID to manage saved transactions.")
     else:
