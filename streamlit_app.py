@@ -9,7 +9,7 @@ from streamlit_echarts import st_echarts
 from utils.echarts import make_echarts_sankey_options
 from utils.io import read_csv_any, read_table_any, get_excel_sheets, validate_upload
 from utils.sankey import prepare_sankey_data, make_sankey_figure
-
+from utils.default_catalog import DEFAULT_CATEGORIES, DEFAULT_INCOME_SOURCES, flat_default_categories, defaults_for
 from utils.constants import SAMPLE_CSV, DEFAULT_HEADERS, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB, LOOKUP_HEADERS, FREQUENCY_CHOICES
 from utils.sheets import read_workspace, write_workspace, sanitize_workspace_id, VersionConflict, read_lookup_for_ws, write_lookup_for_ws
 
@@ -21,6 +21,96 @@ from rapidfuzz import process, fuzz  # NEW
 # =======================================================================================
 # Helper functions
 # =======================================================================================
+
+# ---- Snapshots helper so every tab can safely read the same 3 frames
+def get_snapshots(df_raw_fallback: pd.DataFrame):
+    budget = st.session_state.get("ws_budget_df", df_raw_fallback.copy())
+    tx     = st.session_state.get("ws_tx_df", st.session_state.get("tx_staged", pd.DataFrame()))
+    lookup = st.session_state.get("ws_lookup_df", pd.DataFrame(columns=LOOKUP_HEADERS))
+    return budget, tx, lookup
+
+
+# ============= Guided Builder helpers =============
+
+def _detect_subcategory_column(df: pd.DataFrame) -> str | None:
+    """Try to find an existing Subcategory column."""
+    if df is None or df.empty:
+        return None
+    for cand in ["Subcategory", "Sub-category", "Sub Category"]:
+        if cand in df.columns:
+            return cand
+    # fallback: none
+    return None
+
+def _ensure_subcategory_column(df: pd.DataFrame, subcat_col_name: str = "Subcategory") -> pd.DataFrame:
+    """Add a Subcategory column if missing (keeps existing data intact)."""
+    if subcat_col_name not in df.columns:
+        df = df.copy()
+        df[subcat_col_name] = ""
+    return df
+
+def _load_l1_factors_from_lookup(lookup_df: pd.DataFrame) -> dict[str, float]:
+    """Convert lookup table to a dict Level1 -> Factor_per_month."""
+    if lookup_df is None or lookup_df.empty:
+        return {}
+    out = {}
+    for _, r in lookup_df.iterrows():
+        l1v = str(r.get("Level1", "")).strip()
+        fv  = pd.to_numeric(r.get("Factor_per_month", 1.0), errors="coerce")
+        if l1v:
+            out[l1v] = float(fv if pd.notna(fv) else 1.0)
+    return out
+
+def _write_l1_factor(ws_id: str, lookup_df: pd.DataFrame, level1_val: str, factor: float) -> pd.DataFrame:
+    """Upsert (Level1 -> Factor_per_month) in lookup, persist to Sheets & return fresh df."""
+    # Normalize
+    level1_val = str(level1_val).strip()
+    factor = float(factor if factor is not None else 1.0)
+
+    # Prepare updated lookup dataframe
+    base = lookup_df.copy() if lookup_df is not None else pd.DataFrame(columns=["Level1", "Frequency", "Factor_per_month"])
+    if "Level1" not in base.columns: base["Level1"] = ""
+    if "Frequency" not in base.columns: base["Frequency"] = ""
+    if "Factor_per_month" not in base.columns: base["Factor_per_month"] = 1.0
+
+    mask = base["Level1"].astype(str).str.strip().eq(level1_val)
+    if mask.any():
+        base.loc[mask, "Factor_per_month"] = factor
+        if "Frequency" in base.columns and base.loc[mask, "Frequency"].isna().any():
+            base.loc[mask, "Frequency"] = "monthly"
+    else:
+        base = pd.concat([base, pd.DataFrame([{
+            "Level1": level1_val,
+            "Frequency": "monthly",
+            "Factor_per_month": factor
+        }])], ignore_index=True)
+
+    # Persist if workspace is available
+    if ws_id:
+        try:
+            write_lookup_for_ws(ws_id, base)
+        except Exception as e:
+            st.warning(f"Could not save factor for '{level1_val}': {e}")
+
+    return base
+
+def _account_col_from_budget(df: pd.DataFrame) -> str | None:
+    """Find the budget-side account column (Bank Account / Account / Destination)."""
+    if df is None or df.empty:
+        return None
+    priority = ["Bank Account", "Account", "Destination"]
+    cols = list(df.columns)
+    # exact case-insensitive
+    for target in priority:
+        for c in cols:
+            if str(c).strip().lower() == target.lower():
+                return c
+    # substring fallback
+    for target in priority:
+        for c in cols:
+            if target.lower() in str(c).strip().lower():
+                return c
+    return None
 
 # ---- Fuzzy suggestion helper (RapidFuzz)
 def _suggest_category_universe_with_score(text: str, universe: list[str], cutoff: int = 10) -> tuple[str, int]:
@@ -297,6 +387,9 @@ else:
 st.session_state.setdefault("ws_budget_df", df_raw.copy())
 st.session_state.setdefault("ws_tx_df", st.session_state.get("tx_staged", pd.DataFrame()))
 st.session_state.setdefault("ws_lookup_df", pd.DataFrame(columns=LOOKUP_HEADERS))
+# Guide toggle default
+st.session_state.setdefault("guide_active", False)
+
 # ---------------------------------------------------------------------------
 
 # 4) MAP COLUMNS
@@ -435,18 +528,20 @@ with st.sidebar.expander("View/Edit Lookup", expanded=False):
 tab_setup, tab_overview, tab_settings = st.tabs(["🧭 Initialize", "📊 Summary", "⚙️ Settings"])
 
 with tab_setup:
+# Snapshots used in Initialize
+    budget_df, tx_df, lookup_df = get_snapshots(df_raw)
+
     # -----------------------------------
     # Budget table (editable) + preview filter
     # -----------------------------------
-    st.divider()
     section_header("📦", "Budget table", f"Source: {source_name}")
 
-    with st.expander("Filter rows (Budget)", expanded=False):
-        q_budget = st.text_input("Search text (all columns)", key="q_budget").strip().lower()
-        col_filter_budget = st.selectbox("Filter by column (optional)", options=["(none)"] + list(df_raw.columns), index=0, key="col_filter_budget")
-        val_filter_budget = ""
-        if col_filter_budget and col_filter_budget != "(none)":
-            val_filter_budget = st.text_input(f"Show rows where **{col_filter_budget}** contains:", key="val_filter_budget").strip().lower()
+    # with st.expander("Filter rows (Budget)", expanded=False):
+    #     q_budget = st.text_input("Search text (all columns)", key="q_budget").strip().lower()
+    #     col_filter_budget = st.selectbox("Filter by column (optional)", options=["(none)"] + list(df_raw.columns), index=0, key="col_filter_budget")
+    #     val_filter_budget = ""
+    #     if col_filter_budget and col_filter_budget != "(none)":
+    #         val_filter_budget = st.text_input(f"Show rows where **{col_filter_budget}** contains:", key="val_filter_budget").strip().lower()
 
     edited_df = st.data_editor(
         df_raw,
@@ -459,14 +554,14 @@ with tab_setup:
     st.session_state["ws_budget_df"] = edited_df.copy()
     # -------------------------------------------------------------------------
 
-    df_budget_preview = edited_df.copy()
-    if q_budget:
-        df_budget_preview = df_budget_preview[df_budget_preview.apply(lambda r: q_budget in str(r.values).lower(), axis=1)]
-    if col_filter_budget and col_filter_budget != "(none)" and val_filter_budget:
-        df_budget_preview = df_budget_preview[df_budget_preview[col_filter_budget].astype(str).str.lower().str.contains(val_filter_budget, na=False)]
+    # df_budget_preview = edited_df.copy()
+    # if q_budget:
+    #     df_budget_preview = df_budget_preview[df_budget_preview.apply(lambda r: q_budget in str(r.values).lower(), axis=1)]
+    # if col_filter_budget and col_filter_budget != "(none)" and val_filter_budget:
+    #     df_budget_preview = df_budget_preview[df_budget_preview[col_filter_budget].astype(str).str.lower().str.contains(val_filter_budget, na=False)]
 
-    st.caption("Preview (filtered)")
-    st.dataframe(df_budget_preview, use_container_width=True)
+#    st.caption("Preview (filtered)")
+#    st.dataframe(df_budget_preview, use_container_width=True)
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -518,10 +613,273 @@ with tab_setup:
         except Exception as e:
             st.error(f"Save failed: {e}")
 
+# -----------------------------------
+# Guided Budget Builder (step-by-step rows) — REACTIVE (no st.form)
+# -----------------------------------
+st.divider()
+st.subheader("🧭 Guided Budget Builder")
+
+# Fresh snapshots (no mutation yet)
+_budget_df_snap, _tx_df_snap, _lookup_df_snap = get_snapshots(df_raw)
+
+# ---- Controls (start / factors / clear) ----
+# Ensure default exists once
+st.session_state.setdefault("guide_active", False)
+
+def _on_toggle_change():
+    # Optional: lightweight housekeeping when guide is toggled
+    # e.g., clear staged rows when turning off
+    if not st.session_state["guide_active"]:
+        st.session_state["guide_rows"] = []
+
+cols_head = st.columns([1, 1, 1, 2])
+with cols_head[0]:
+    st.toggle(
+        "Start Guide",
+        key="guide_active",              # <-- use key, not value
+        help="Create rows step-by-step.",
+        on_change=_on_toggle_change      # <-- optional, no _rerun() here
+    )
+
+with cols_head[1]:
+    if st.button("Manage Factors ⚙️", use_container_width=True):
+        st.session_state["show_factor_manager"] = True
+
+with cols_head[2]:
+    if st.button("Clear staged rows 🧹", use_container_width=True, disabled=not bool(st.session_state["guide_rows"])):
+        st.session_state["guide_rows"] = []
+        st.success("Cleared staged rows.")
+
+# ===== When the guide is OFF, do not touch any frames =====
+if not st.session_state["guide_active"]:
+    st.caption("💡 Turn **Start Guide** on to build rows step-by-step. Sankey charts stay visible while the guide is off.")
+else:
+    # ===== Guide is ON: safe, local prep then persist only what’s needed =====
+    budget_df = _budget_df_snap.copy()
+    lookup_df = _lookup_df_snap.copy()
+
+    # Ensure Subcategory, Category Universe, Account columns (guide-only)
+    existing_subcat_col = _detect_subcategory_column(budget_df)
+    subcategory_col = existing_subcat_col or "Subcategory"
+    budget_df = _ensure_subcategory_column(budget_df, subcategory_col)
+
+    cu_col = (
+        st.session_state.get("cat_universe_col")
+        or st.session_state.get("cu_col_saved")
+        or "Category"
+    )
+    if cu_col not in budget_df.columns:
+        budget_df[cu_col] = ""
+
+    budget_account_col = _account_col_from_budget(budget_df) or "Account"
+    if budget_account_col not in budget_df.columns:
+        budget_df[budget_account_col] = ""
+
+    # Persist guide-prepared frame for downstream widgets that rely on it
+    st.session_state["ws_budget_df"] = budget_df
+
+    # L1 factors cache
+    if "guide_l1_factors" not in st.session_state:
+        st.session_state["guide_l1_factors"] = _load_l1_factors_from_lookup(lookup_df)
+    st.session_state.setdefault("guide_rows", [])
+
+    # ===== Factor manager =====
+    if st.session_state.get("show_factor_manager"):
+        with st.expander("Manage Level 1 Factors", expanded=True):
+            l1_factors = st.session_state["guide_l1_factors"]
+            if not l1_factors:
+                st.info("No stored factors yet. Add some by creating rows or set them manually here.")
+            editable = [{"Level1": k, "Factor_per_month": v} for k, v in sorted(l1_factors.items())]
+            df_edit = pd.DataFrame(editable or [], columns=["Level1", "Factor_per_month"])
+            df_edit = st.data_editor(
+                df_edit,
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Level1": st.column_config.TextColumn("Income by / Source"),
+                    "Factor_per_month": st.column_config.NumberColumn("Factor per month", step=0.05, format="%.2f"),
+                }
+            )
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                if st.button("Save Factors", type="primary", use_container_width=True):
+                    new_map = {}
+                    for _, r in df_edit.iterrows():
+                        lvl = str(r["Level1"]).strip()
+                        fac = float(pd.to_numeric(r["Factor_per_month"], errors="coerce") or 1.0)
+                        if lvl:
+                            new_map[lvl] = fac
+                            lookup_df = _write_l1_factor(ws_id, lookup_df, lvl, fac)
+                    st.session_state["guide_l1_factors"] = new_map
+                    st.session_state["ws_lookup_df"] = lookup_df
+                    st.success("Factors saved.")
+            with c2:
+                if st.button("Close"):
+                    st.session_state["show_factor_manager"] = False
+                    _rerun()
+
+    # ===== Helper: selectbox with instant "type new" input =====
+    def pick_or_type(label: str, options: list[str], key: str, placeholder: str = "Type new…"):
+        opts = ["— Type new —"] + options
+        sel = st.selectbox(label, options=opts, key=f"{key}_sel")
+        if sel == "— Type new —":
+            typed = st.text_input(" ", key=f"{key}_typed", placeholder=placeholder, label_visibility="collapsed")
+            return (typed.strip(), True) if typed else ("", True)
+        return (sel, False)
+
+    # ===== Guided inputs =====
+    st.markdown("Configure one row at a time. You can insert staged rows into the table when ready.")
+
+    existing_l1_vals = sorted(budget_df[l1].dropna().astype(str).unique().tolist()) if l1 in budget_df.columns else []
+    existing_categories = sorted(budget_df[cu_col].dropna().astype(str).unique().tolist()) if cu_col in budget_df.columns else []
+    existing_subs = sorted(budget_df[subcategory_col].dropna().astype(str).unique().tolist()) if subcategory_col in budget_df.columns else []
+    existing_accounts = sorted(budget_df[budget_account_col].dropna().astype(str).unique().tolist()) if budget_account_col in budget_df.columns else []
+
+    l1_col1, l1_col2 = st.columns([1, 1])
+    with l1_col1:
+        l1_val, l1_is_new = pick_or_type(
+            "Income by / Source (Level 1)",
+            list(dict.fromkeys(existing_l1_vals + DEFAULT_INCOME_SOURCES)),
+            key="guide_l1",
+            placeholder="e.g., Me / Partner / Side hustle"
+        )
+    with l1_col2:
+        factor_known = bool(l1_val) and (l1_val in st.session_state["guide_l1_factors"])
+        if l1_val and not factor_known:
+            st.info(f"Set a **monthly factor** for '{l1_val}'. Asked once and reused.")
+            presets = {"Monthly (1.0)": 1.0, "Bi-monthly (0.5)": 0.5, "Weekly (~4.3)": 4.3, "Custom": None}
+            preset_choice = st.selectbox("Preset", list(presets.keys()), index=0, key="guide_factor_preset")
+            custom_factor = None
+            if presets[preset_choice] is None:
+                custom_factor = st.number_input("Custom factor per month", min_value=0.0, step=0.05, value=1.0, key="guide_factor_custom")
+            proposed_factor = presets[preset_choice] if presets[preset_choice] is not None else custom_factor
+            remember_factor = st.checkbox(f"Remember {proposed_factor or 1.0} for '{l1_val}'", value=True, key="guide_factor_remember")
+        else:
+            proposed_factor = st.session_state["guide_l1_factors"].get(l1_val, 1.0) if l1_val else 1.0
+            remember_factor = False
+
+    cat_col1, cat_col2 = st.columns([1, 1])
+    with cat_col1:
+        category_val, cat_is_new = pick_or_type(
+            f"Category ({cu_col})",
+            list(dict.fromkeys(flat_default_categories() + existing_categories)),
+            key="guide_cat",
+            placeholder="e.g., Groceries"
+        )
+    default_subs_for_cat = defaults_for(category_val) if category_val else []
+    with cat_col2:
+        sub_val, sub_is_new = pick_or_type(
+            f"Subcategory ({subcategory_col})",
+            list(dict.fromkeys(default_subs_for_cat + existing_subs)),
+            key="guide_sub",
+            placeholder="e.g., Pantry"
+        )
+
+    acc_col1, acc_col2 = st.columns([1, 1])
+    with acc_col1:
+        account_val, acc_is_new = pick_or_type(
+            f"Account ({budget_account_col})",
+            existing_accounts,
+            key="guide_acct",
+            placeholder="e.g., Checking"
+        )
+    with acc_col2:
+        amount_val = st.number_input("Amount (positive number)", min_value=0.0, step=10.0, value=0.0, key="guide_amount")
+
+    frc_col, note_col = st.columns([1, 1])
+    with frc_col:
+        freq_choice = st.selectbox("Frequency (helper)", ["Monthly", "Bi-monthly", "Weekly (~4.3)", "One-time", "Other"], index=0, key="guide_freq")
+    with note_col:
+        notes_val = st.text_input("Notes (optional)", placeholder="Add a short note", key="guide_notes")
+
+    st.caption("Quick apply")
+    qc1, qc2 = st.columns([1, 1])
+    apply_account_all = qc1.checkbox("Apply Account to all of this Category", value=False, key="guide_apply_acct_all")
+    apply_sub_all     = qc2.checkbox("Apply Subcategory to similar rows", value=False, key="guide_apply_sub_all")
+
+    if st.button("Stage row ➕", type="primary", key="guide_stage_btn"):
+        if not l1_val:
+            st.error("Please provide an Income Source (Level 1).")
+        elif not category_val:
+            st.error("Please choose or type a Category.")
+        elif amount_val <= 0:
+            st.error("Amount must be greater than zero.")
+        else:
+            # Save factor once
+            if l1_val and not factor_known and remember_factor and proposed_factor is not None:
+                lookup_df = _write_l1_factor(ws_id, lookup_df, l1_val, float(proposed_factor))
+                st.session_state["ws_lookup_df"] = lookup_df
+                st.session_state["guide_l1_factors"][l1_val] = float(proposed_factor)
+
+            new_row = {col: "" for col in budget_df.columns}
+            if l1 in new_row: new_row[l1] = l1_val
+            new_row[cu_col] = category_val
+            new_row[subcategory_col] = sub_val
+            new_row[budget_account_col] = account_val
+            if val_col in new_row:
+                new_row[val_col] = amount_val
+            if "Frequency" in new_row:
+                new_row["Frequency"] = freq_choice
+            if "Notes" in new_row:
+                note_text = notes_val
+                if freq_choice and freq_choice != "Monthly":
+                    note_text = (note_text + f" [Freq: {freq_choice}]").strip()
+                new_row["Notes"] = note_text
+
+            st.session_state["guide_rows"].append({
+                "row": new_row,
+                "apply_account_all": apply_account_all,
+                "apply_sub_all": apply_sub_all,
+                "l1": l1_val,
+                "category": category_val,
+                "subcategory": sub_val,
+                "account": account_val,
+            })
+            st.success("Row staged. You can stage more, or insert them into the table below.")
+
+    # ---- Staged rows tray ----
+    staged = st.session_state["guide_rows"]
+    if staged:
+        st.markdown("#### 🗂️ Staged rows")
+        staged_df = pd.DataFrame([r["row"] for r in staged])
+        if val_col not in staged_df.columns:
+            staged_df[val_col] = 0.0
+        st.dataframe(staged_df, use_container_width=True)
+
+        i1, i2 = st.columns([1, 2])
+        with i1:
+            if st.button("Insert staged into Budget table ✅", type="primary", use_container_width=True, key="guide_insert_btn"):
+                target_df = st.session_state.get("ws_budget_df", _budget_df_snap.copy()).copy()
+                for col in staged_df.columns:
+                    if col not in target_df.columns:
+                        target_df[col] = ""
+                target_df = pd.concat([target_df, staged_df[target_df.columns]], ignore_index=True)
+
+                for item in staged:
+                    if item["apply_account_all"] and item["category"]:
+                        mask = target_df[cu_col].astype(str).eq(item["category"])
+                        target_df.loc[mask, budget_account_col] = target_df.loc[mask, budget_account_col].replace("", item["account"])
+                    if item["apply_sub_all"] and item["subcategory"]:
+                        mask = target_df[cu_col].astype(str).eq(item["category"])
+                        target_df.loc[mask, subcategory_col] = target_df.loc[mask, subcategory_col].replace("", item["subcategory"])
+
+                st.session_state["ws_budget_df"] = target_df
+                st.session_state["editor"] = target_df  # keep the table editor in sync
+                st.session_state["guide_rows"] = []
+                st.success("Inserted staged rows into the budget table.")
+                _rerun()
+        with i2:
+            st.caption("Tip: You can still edit cells in the main table and save to your workspace as usual.")
+
+# Small hint while guide is on
+if st.session_state["guide_active"]:
+    st.caption("💡 While the guide is on, Sankey charts are hidden so you can focus on building rows.")
+if not st.session_state.get("guide_active", False):
     # =========================
     # Filters (Overview-only state keys)
     # =========================
-    section_header("🔎", "Filters")
+    section_header("🪢 🔎", "Budget flow | Filters")
 
     # ---------- NEW: use snapshots captured earlier ----------
     budget_df = st.session_state.get("ws_budget_df", df_raw.copy())
@@ -600,8 +958,6 @@ with tab_setup:
     # -----------------------------------
     # Budget Sankey (after table) — respects Overview filters & snapshots
     # -----------------------------------
-    st.divider()
-    section_header("🪢", "Budget flow (Sankey)")
 
     viz_df = budget_df.copy()
     if l1 in viz_df.columns and level1_selected:
@@ -648,7 +1004,8 @@ with tab_setup:
             st_echarts(options=options, height="600px",theme=ECHR_THEME)
     except Exception as e:
         st.error(f"Could not render chart: {e}")
-
+else:
+    st.info("Guided Builder is active — budget Sankey is hidden until you finish or turn it off.")
     # -----------------------------------
     # Transactions (map & classify) — uploader is in sidebar
     # -----------------------------------
@@ -867,8 +1224,8 @@ with tab_setup:
         if col_filter_tx and col_filter_tx != "(none)" and val_filter_tx:
             df_tx_preview = df_tx_preview[df_tx_preview[col_filter_tx].astype(str).str.lower().str.contains(val_filter_tx, na=False)]
 
-        st.caption("Preview (filtered)")
-        st.dataframe(df_tx_preview, use_container_width=True)
+#        st.caption("Preview (filtered)")
+#        st.dataframe(df_tx_preview, use_container_width=True)
 
         if apply_clicked:
             st.session_state["tx_staged"] = df_tx_form
@@ -1102,6 +1459,7 @@ with tab_setup:
     # =========================
     # Actuals (Transactions) Sankey — Expense -> AssignedCategory -> Merchant
     # =========================
+if not st.session_state.get("guide_active", False):
     if tx_df is not None and not pd.DataFrame(tx_df).empty:
         section_header("💳", "Actuals flow (Sankey)")
         try:
@@ -1160,6 +1518,8 @@ with tab_setup:
             st.error(f"Could not render Actuals Sankey: {e}")
 
 with tab_overview:
+# Snapshots used in Summary
+    budget_df, tx_df, lookup_df = get_snapshots(df_raw)
 
     # -----------------------------------
     # Period Summary + Budget vs Actuals + Payments
