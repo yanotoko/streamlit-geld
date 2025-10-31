@@ -623,22 +623,23 @@ st.subheader("🧭 Guided Budget Builder")
 _budget_df_snap, _tx_df_snap, _lookup_df_snap = get_snapshots(df_raw)
 
 # ---- Controls (start / factors / clear) ----
-# Ensure default exists once
+# Initialize all guide-related keys exactly once
 st.session_state.setdefault("guide_active", False)
+st.session_state.setdefault("guide_rows", [])
+st.session_state.setdefault("show_factor_manager", False)
 
 def _on_toggle_change():
-    # Optional: lightweight housekeeping when guide is toggled
-    # e.g., clear staged rows when turning off
-    if not st.session_state["guide_active"]:
-        st.session_state["guide_rows"] = []
+    # When turning the guide OFF, clear staged rows (optional)
+    if not st.session_state.get("guide_active", False):
+        st.session_state["guide_rows"].clear()
 
 cols_head = st.columns([1, 1, 1, 2])
 with cols_head[0]:
     st.toggle(
         "Start Guide",
-        key="guide_active",              # <-- use key, not value
+        key="guide_active",
         help="Create rows step-by-step.",
-        on_change=_on_toggle_change      # <-- optional, no _rerun() here
+        on_change=_on_toggle_change
     )
 
 with cols_head[1]:
@@ -646,8 +647,10 @@ with cols_head[1]:
         st.session_state["show_factor_manager"] = True
 
 with cols_head[2]:
-    if st.button("Clear staged rows 🧹", use_container_width=True, disabled=not bool(st.session_state["guide_rows"])):
-        st.session_state["guide_rows"] = []
+    # Use .get(...) so we don't KeyError before init
+    has_staged = bool(st.session_state.get("guide_rows", []))
+    if st.button("Clear staged rows 🧹", use_container_width=True, disabled=not has_staged):
+        st.session_state["guide_rows"].clear()
         st.success("Cleared staged rows.")
 
 # ===== When the guide is OFF, do not touch any frames =====
