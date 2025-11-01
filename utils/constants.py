@@ -1,13 +1,13 @@
 # utils/constants.py
 
-SAMPLE_CSV = """Category,Bank Account,Subcategory,Amount
-Income 1,Utilities,Bank3,100
-Income 1,Travel,Bank1,100
-Income 2,Saving 4,Bank2,100
-Income 2,Saving 5,Bank2,100
+SAMPLE_CSV = """Category,Bank Account,Subcategory,Amount,Income
+Food & Groceries,Utilities,Bank3,100,Income 1
+Food & Groceries,Travel,Bank1,100,Income 1
+Travel,Saving 4,Bank2,100,Income 2
+Housing,Saving 5,Bank2,100,Income 2
 """
 
-DEFAULT_HEADERS = ["Category", "Bank Account", "Subcategory", "Amount"]
+DEFAULT_HEADERS = ["Category", "Bank Account", "Subcategory", "Amount","Income"]
 
 # Upload hardening
 MAX_UPLOAD_MB = 10  # change if you like
