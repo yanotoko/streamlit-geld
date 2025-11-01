@@ -389,6 +389,7 @@ st.session_state.setdefault("ws_tx_df", st.session_state.get("tx_staged", pd.Dat
 st.session_state.setdefault("ws_lookup_df", pd.DataFrame(columns=LOOKUP_HEADERS))
 # Guide toggle default
 st.session_state.setdefault("guide_active", False)
+st.session_state.setdefault("__editor_rev", 0)
 
 # ---------------------------------------------------------------------------
 
@@ -531,48 +532,22 @@ with tab_setup:
 # Snapshots used in Initialize
     budget_df, tx_df, lookup_df = get_snapshots(df_raw)
 
+    st.session_state.setdefault("__editor_rev", 0)
     # -----------------------------------
-    # Budget table (editable) + preview filter
+    # Budget table (editable) + preview
     # -----------------------------------
     section_header("📦", "Budget table", f"Source: {source_name}")
 
-    # with st.expander("Filter rows (Budget)", expanded=False):
-    #     q_budget = st.text_input("Search text (all columns)", key="q_budget").strip().lower()
-    #     col_filter_budget = st.selectbox("Filter by column (optional)", options=["(none)"] + list(df_raw.columns), index=0, key="col_filter_budget")
-    #     val_filter_budget = ""
-    #     if col_filter_budget and col_filter_budget != "(none)":
-    #         val_filter_budget = st.text_input(f"Show rows where **{col_filter_budget}** contains:", key="val_filter_budget").strip().lower()
-
+    editor_input_df = st.session_state.get("ws_budget_df", df_raw).copy()
     edited_df = st.data_editor(
-        df_raw,
+        editor_input_df,
         num_rows="dynamic",
         use_container_width=True,
-        key="editor"
+        key=f"setup_editor_{st.session_state['__editor_rev']}"
     )
 
-    # ---------- NEW: keep Overview snapshot in sync with Setup edits ----------
+    # Keep shared snapshot in sync with edits
     st.session_state["ws_budget_df"] = edited_df.copy()
-    # -------------------------------------------------------------------------
-
-    # df_budget_preview = edited_df.copy()
-    # if q_budget:
-    #     df_budget_preview = df_budget_preview[df_budget_preview.apply(lambda r: q_budget in str(r.values).lower(), axis=1)]
-    # if col_filter_budget and col_filter_budget != "(none)" and val_filter_budget:
-    #     df_budget_preview = df_budget_preview[df_budget_preview[col_filter_budget].astype(str).str.lower().str.contains(val_filter_budget, na=False)]
-
-#    st.caption("Preview (filtered)")
-#    st.dataframe(df_budget_preview, use_container_width=True)
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("Use Edited Data"):
-            df_in = edited_df.copy()
-            st.success("Using edited data for the chart.")
-        else:
-            df_in = df_raw.copy()
-    with col_b:
-        csv_bytes = edited_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Edited CSV", csv_bytes, "edited_data.csv", use_container_width=True)
 
     # -----------------------------------
     # Save budget to Workspace
@@ -853,12 +828,12 @@ else:
         i1, i2 = st.columns([1, 2])
         with i1:
             if st.button("Insert staged into Budget table ✅", type="primary", use_container_width=True, key="guide_insert_btn"):
-                target_df = st.session_state.get("ws_budget_df", _budget_df_snap.copy()).copy()
+                target_df = st.session_state.get("ws_budget_df", df_raw.copy())
                 for col in staged_df.columns:
                     if col not in target_df.columns:
                         target_df[col] = ""
                 target_df = pd.concat([target_df, staged_df[target_df.columns]], ignore_index=True)
-
+    
                 for item in staged:
                     if item["apply_account_all"] and item["category"]:
                         mask = target_df[cu_col].astype(str).eq(item["category"])
@@ -866,12 +841,19 @@ else:
                     if item["apply_sub_all"] and item["subcategory"]:
                         mask = target_df[cu_col].astype(str).eq(item["category"])
                         target_df.loc[mask, subcategory_col] = target_df.loc[mask, subcategory_col].replace("", item["subcategory"])
-
+    
+                # ✅ update our data snapshot
                 st.session_state["ws_budget_df"] = target_df
-                st.session_state["editor"] = target_df  # keep the table editor in sync
+    
+                # ✅ bump the editor revision so the data editor remounts with new data
+                st.session_state["__editor_rev"] += 1
+    
+                # clear staged and refresh UI
                 st.session_state["guide_rows"] = []
+                #st.session_state["guide_active"] = False
                 st.success("Inserted staged rows into the budget table.")
                 _rerun()
+
         with i2:
             st.caption("Tip: You can still edit cells in the main table and save to your workspace as usual.")
 
