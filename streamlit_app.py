@@ -9,7 +9,7 @@ from streamlit_echarts import st_echarts
 from utils.echarts import make_echarts_sankey_options
 from utils.io import read_csv_any, read_table_any, get_excel_sheets, validate_upload
 from utils.sankey import prepare_sankey_data, make_sankey_figure
-from utils.default_catalog import DEFAULT_CATEGORIES, DEFAULT_INCOME_SOURCES, flat_default_categories, defaults_for
+from utils.default_catalog import DEFAULT_INCOME_SOURCES, flat_default_categories, defaults_for
 from utils.constants import SAMPLE_CSV, DEFAULT_HEADERS, ALLOWED_EXTS, ALLOWED_MIME, MAX_UPLOAD_MB, LOOKUP_HEADERS, FREQUENCY_CHOICES
 from utils.sheets import read_workspace, write_workspace, sanitize_workspace_id, VersionConflict, read_lookup_for_ws, write_lookup_for_ws
 
@@ -588,858 +588,873 @@ with tab_setup:
         except Exception as e:
             st.error(f"Save failed: {e}")
 
-# -----------------------------------
-# Guided Budget Builder (step-by-step rows) — REACTIVE (no st.form)
-# -----------------------------------
-st.divider()
-st.subheader("🧭 Guided Budget Builder")
-
-# Fresh snapshots (no mutation yet)
-_budget_df_snap, _tx_df_snap, _lookup_df_snap = get_snapshots(df_raw)
-
-# ---- Controls (start / factors / clear) ----
-# Initialize all guide-related keys exactly once
-st.session_state.setdefault("guide_active", False)
-st.session_state.setdefault("guide_rows", [])
-st.session_state.setdefault("show_factor_manager", False)
-
-def _on_toggle_change():
-    # When turning the guide OFF, clear staged rows (optional)
-    if not st.session_state.get("guide_active", False):
-        st.session_state["guide_rows"].clear()
-
-cols_head = st.columns([1, 1, 1, 2])
-with cols_head[0]:
-    st.toggle(
-        "Start Guide",
-        key="guide_active",
-        help="Create rows step-by-step.",
-        on_change=_on_toggle_change
-    )
-
-with cols_head[1]:
-    if st.button("Manage Factors ⚙️", use_container_width=True):
-        st.session_state["show_factor_manager"] = True
-
-with cols_head[2]:
-    # Use .get(...) so we don't KeyError before init
-    has_staged = bool(st.session_state.get("guide_rows", []))
-    if st.button("Clear staged rows 🧹", use_container_width=True, disabled=not has_staged):
-        st.session_state["guide_rows"].clear()
-        st.success("Cleared staged rows.")
-
-# ===== When the guide is OFF, do not touch any frames =====
-if not st.session_state["guide_active"]:
-    st.caption("💡 Turn **Start Guide** on to build rows step-by-step. Sankey charts stay visible while the guide is off.")
-else:
-    # ===== Guide is ON: safe, local prep then persist only what’s needed =====
-    budget_df = _budget_df_snap.copy()
-    lookup_df = _lookup_df_snap.copy()
-
-    # Ensure Subcategory, Category Universe, Account columns (guide-only)
-    existing_subcat_col = _detect_subcategory_column(budget_df)
-    subcategory_col = existing_subcat_col or "Subcategory"
-    budget_df = _ensure_subcategory_column(budget_df, subcategory_col)
-
-    cu_col = (
-        st.session_state.get("cat_universe_col")
-        or st.session_state.get("cu_col_saved")
-        or "Category"
-    )
-    if cu_col not in budget_df.columns:
-        budget_df[cu_col] = ""
-
-    budget_account_col = _account_col_from_budget(budget_df) or "Account"
-    if budget_account_col not in budget_df.columns:
-        budget_df[budget_account_col] = ""
-
-    # Persist guide-prepared frame for downstream widgets that rely on it
-    st.session_state["ws_budget_df"] = budget_df
-
-    # L1 factors cache
-    if "guide_l1_factors" not in st.session_state:
-        st.session_state["guide_l1_factors"] = _load_l1_factors_from_lookup(lookup_df)
-    st.session_state.setdefault("guide_rows", [])
-
-    # ===== Factor manager =====
-    if st.session_state.get("show_factor_manager"):
-        with st.expander("Manage Level 1 Factors", expanded=True):
-            l1_factors = st.session_state["guide_l1_factors"]
-            if not l1_factors:
-                st.info("No stored factors yet. Add some by creating rows or set them manually here.")
-            editable = [{"Level1": k, "Factor_per_month": v} for k, v in sorted(l1_factors.items())]
-            df_edit = pd.DataFrame(editable or [], columns=["Level1", "Factor_per_month"])
-            df_edit = st.data_editor(
-                df_edit,
-                num_rows="dynamic",
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Level1": st.column_config.TextColumn("Income by / Source"),
-                    "Factor_per_month": st.column_config.NumberColumn("Factor per month", step=0.05, format="%.2f"),
-                }
-            )
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                if st.button("Save Factors", type="primary", use_container_width=True):
-                    new_map = {}
-                    for _, r in df_edit.iterrows():
-                        lvl = str(r["Level1"]).strip()
-                        fac = float(pd.to_numeric(r["Factor_per_month"], errors="coerce") or 1.0)
-                        if lvl:
-                            new_map[lvl] = fac
-                            lookup_df = _write_l1_factor(ws_id, lookup_df, lvl, fac)
-                    st.session_state["guide_l1_factors"] = new_map
-                    st.session_state["ws_lookup_df"] = lookup_df
-                    st.success("Factors saved.")
-            with c2:
-                if st.button("Close"):
-                    st.session_state["show_factor_manager"] = False
-                    _rerun()
-
-    # ===== Helper: selectbox with instant "type new" input =====
-    def pick_or_type(label: str, options: list[str], key: str, placeholder: str = "Type new…"):
-        opts = ["— Type new —"] + options
-        sel = st.selectbox(label, options=opts, key=f"{key}_sel")
-        if sel == "— Type new —":
-            typed = st.text_input(" ", key=f"{key}_typed", placeholder=placeholder, label_visibility="collapsed")
-            return (typed.strip(), True) if typed else ("", True)
-        return (sel, False)
-
-    # ===== Guided inputs =====
-    st.markdown("Configure one row at a time. You can insert staged rows into the table when ready.")
-
-    existing_l1_vals = sorted(budget_df[l1].dropna().astype(str).unique().tolist()) if l1 in budget_df.columns else []
-    existing_categories = sorted(budget_df[cu_col].dropna().astype(str).unique().tolist()) if cu_col in budget_df.columns else []
-    existing_subs = sorted(budget_df[subcategory_col].dropna().astype(str).unique().tolist()) if subcategory_col in budget_df.columns else []
-    existing_accounts = sorted(budget_df[budget_account_col].dropna().astype(str).unique().tolist()) if budget_account_col in budget_df.columns else []
-
-    l1_col1, l1_col2 = st.columns([1, 1])
-    with l1_col1:
-        l1_val, l1_is_new = pick_or_type(
-            "Income by / Source (Level 1)",
-            list(dict.fromkeys(existing_l1_vals + DEFAULT_INCOME_SOURCES)),
-            key="guide_l1",
-            placeholder="e.g., Me / Partner / Side hustle"
-        )
-    with l1_col2:
-        factor_known = bool(l1_val) and (l1_val in st.session_state["guide_l1_factors"])
-        if l1_val and not factor_known:
-            st.info(f"Set a **monthly factor** for '{l1_val}'. Asked once and reused.")
-            presets = {"Monthly (1.0)": 1.0, "Bi-monthly (0.5)": 0.5, "Weekly (~4.3)": 4.3, "Custom": None}
-            preset_choice = st.selectbox("Preset", list(presets.keys()), index=0, key="guide_factor_preset")
-            custom_factor = None
-            if presets[preset_choice] is None:
-                custom_factor = st.number_input("Custom factor per month", min_value=0.0, step=0.05, value=1.0, key="guide_factor_custom")
-            proposed_factor = presets[preset_choice] if presets[preset_choice] is not None else custom_factor
-            remember_factor = st.checkbox(f"Remember {proposed_factor or 1.0} for '{l1_val}'", value=True, key="guide_factor_remember")
-        else:
-            proposed_factor = st.session_state["guide_l1_factors"].get(l1_val, 1.0) if l1_val else 1.0
-            remember_factor = False
-
-    cat_col1, cat_col2 = st.columns([1, 1])
-    with cat_col1:
-        category_val, cat_is_new = pick_or_type(
-            f"Category ({cu_col})",
-            list(dict.fromkeys(flat_default_categories() + existing_categories)),
-            key="guide_cat",
-            placeholder="e.g., Groceries"
-        )
-    default_subs_for_cat = defaults_for(category_val) if category_val else []
-    with cat_col2:
-        sub_val, sub_is_new = pick_or_type(
-            f"Subcategory ({subcategory_col})",
-            list(dict.fromkeys(default_subs_for_cat + existing_subs)),
-            key="guide_sub",
-            placeholder="e.g., Pantry"
-        )
-
-    acc_col1, acc_col2 = st.columns([1, 1])
-    with acc_col1:
-        account_val, acc_is_new = pick_or_type(
-            f"Account ({budget_account_col})",
-            existing_accounts,
-            key="guide_acct",
-            placeholder="e.g., Checking"
-        )
-    with acc_col2:
-        amount_val = st.number_input("Amount (positive number)", min_value=0.0, step=10.0, value=0.0, key="guide_amount")
-
-    frc_col, note_col = st.columns([1, 1])
-    with frc_col:
-        freq_choice = st.selectbox("Frequency (helper)", ["Monthly", "Bi-monthly", "Weekly (~4.3)", "One-time", "Other"], index=0, key="guide_freq")
-    with note_col:
-        notes_val = st.text_input("Notes (optional)", placeholder="Add a short note", key="guide_notes")
-
-    st.caption("Quick apply")
-    qc1, qc2 = st.columns([1, 1])
-    apply_account_all = qc1.checkbox("Apply Account to all of this Category", value=False, key="guide_apply_acct_all")
-    apply_sub_all     = qc2.checkbox("Apply Subcategory to similar rows", value=False, key="guide_apply_sub_all")
-
-    if st.button("Stage row ➕", type="primary", key="guide_stage_btn"):
-        if not l1_val:
-            st.error("Please provide an Income Source (Level 1).")
-        elif not category_val:
-            st.error("Please choose or type a Category.")
-        elif amount_val <= 0:
-            st.error("Amount must be greater than zero.")
-        else:
-            # Save factor once
-            if l1_val and not factor_known and remember_factor and proposed_factor is not None:
-                lookup_df = _write_l1_factor(ws_id, lookup_df, l1_val, float(proposed_factor))
-                st.session_state["ws_lookup_df"] = lookup_df
-                st.session_state["guide_l1_factors"][l1_val] = float(proposed_factor)
-
-            new_row = {col: "" for col in budget_df.columns}
-            if l1 in new_row: new_row[l1] = l1_val
-            new_row[cu_col] = category_val
-            new_row[subcategory_col] = sub_val
-            new_row[budget_account_col] = account_val
-            if val_col in new_row:
-                new_row[val_col] = amount_val
-            if "Frequency" in new_row:
-                new_row["Frequency"] = freq_choice
-            if "Notes" in new_row:
-                note_text = notes_val
-                if freq_choice and freq_choice != "Monthly":
-                    note_text = (note_text + f" [Freq: {freq_choice}]").strip()
-                new_row["Notes"] = note_text
-
-            st.session_state["guide_rows"].append({
-                "row": new_row,
-                "apply_account_all": apply_account_all,
-                "apply_sub_all": apply_sub_all,
-                "l1": l1_val,
-                "category": category_val,
-                "subcategory": sub_val,
-                "account": account_val,
-            })
-            st.success("Row staged. You can stage more, or insert them into the table below.")
-
-    # ---- Staged rows tray ----
-    staged = st.session_state["guide_rows"]
-    if staged:
-        st.markdown("#### 🗂️ Staged rows")
-        staged_df = pd.DataFrame([r["row"] for r in staged])
-        if val_col not in staged_df.columns:
-            staged_df[val_col] = 0.0
-        st.dataframe(staged_df, use_container_width=True)
-
-        i1, i2 = st.columns([1, 2])
-        with i1:
-            if st.button("Insert staged into Budget table ✅", type="primary", use_container_width=True, key="guide_insert_btn"):
-                target_df = st.session_state.get("ws_budget_df", df_raw.copy())
-                for col in staged_df.columns:
-                    if col not in target_df.columns:
-                        target_df[col] = ""
-                target_df = pd.concat([target_df, staged_df[target_df.columns]], ignore_index=True)
-    
-                for item in staged:
-                    if item["apply_account_all"] and item["category"]:
-                        mask = target_df[cu_col].astype(str).eq(item["category"])
-                        target_df.loc[mask, budget_account_col] = target_df.loc[mask, budget_account_col].replace("", item["account"])
-                    if item["apply_sub_all"] and item["subcategory"]:
-                        mask = target_df[cu_col].astype(str).eq(item["category"])
-                        target_df.loc[mask, subcategory_col] = target_df.loc[mask, subcategory_col].replace("", item["subcategory"])
-    
-                # ✅ update our data snapshot
-                st.session_state["ws_budget_df"] = target_df
-    
-                # ✅ bump the editor revision so the data editor remounts with new data
-                st.session_state["__editor_rev"] += 1
-    
-                # clear staged and refresh UI
-                st.session_state["guide_rows"] = []
-                #st.session_state["guide_active"] = False
-                st.success("Inserted staged rows into the budget table.")
-                _rerun()
-
-        with i2:
-            st.caption("Tip: You can still edit cells in the main table and save to your workspace as usual.")
-
-# Small hint while guide is on
-if st.session_state["guide_active"]:
-    st.caption("💡 While the guide is on, Sankey charts are hidden so you can focus on building rows.")
-if not st.session_state.get("guide_active", False):
-    # =========================
-    # Filters (Overview-only state keys)
-    # =========================
-    section_header("🪢 🔎", "Budget flow | Filters")
-
-    # ---------- NEW: use snapshots captured earlier ----------
-    budget_df = st.session_state.get("ws_budget_df", df_raw.copy())
-    tx_df     = st.session_state.get("ws_tx_df", st.session_state.get("tx_staged", pd.DataFrame()))
-    lookup_df = st.session_state.get("ws_lookup_df", pd.DataFrame(columns=LOOKUP_HEADERS))
-    cu_col    = st.session_state.get("cu_col_saved") or st.session_state.get("cat_universe_col")
-    # ---------------------------------------------------------
-
-    OV_L1_KEY   = "ov_level1_selected"
-    OV_L2_KEY   = "ov_level2_selected"
-    OV_NORM_KEY = "ov_normalize"
-
-    level1_values_all = sorted(budget_df[l1].dropna().astype(str).unique().tolist()) if l1 in budget_df.columns else []
-
-    l1_signature = (l1, tuple(level1_values_all))
-    prev_l1_signature = st.session_state.get("__ov_l1_signature")
-    if (OV_L1_KEY not in st.session_state) or (prev_l1_signature != l1_signature):
-        st.session_state["__ov_l1_signature"] = l1_signature
-        st.session_state[OV_L1_KEY] = level1_values_all
-
-    preset_l1 = st.session_state.get(OV_L1_KEY, level1_values_all)
-    preset_l1 = [val for val in preset_l1 if val in level1_values_all]
-    if not preset_l1 and level1_values_all:
-        preset_l1 = level1_values_all
-        st.session_state[OV_L1_KEY] = preset_l1
-
-    col_f1, col_f3 = st.columns([3, 1])
-    with col_f1:
-        level1_selected = st.multiselect(
-            "Filter Level 1 categories",
-            options=level1_values_all,
-            default=preset_l1,
-            key=OV_L1_KEY,
-            help="Filter the dataset by the mapped Level 1 column."
-        )
-        level1_selected = [val for val in st.session_state.get(OV_L1_KEY, []) if val in level1_values_all]
-        if not level1_selected and level1_values_all:
-            level1_selected = level1_values_all
-
-    with col_f3:
-        normalize_for_sankey = st.checkbox(
-            "Normalize to monthly",
-            value=True,
-            key=OV_NORM_KEY,
-            help="Convert values to monthly equivalents using the per-workspace lookup."
-        )
-
-    if l1 in budget_df.columns and l2 in budget_df.columns:
-        df_for_l2 = budget_df[budget_df[l1].astype(str).isin(level1_selected)] if level1_selected else budget_df
-        level2_values_all = sorted(df_for_l2[l2].dropna().astype(str).unique().tolist())
-    else:
-        level2_values_all = []
-
-    l2_signature = (l1, l2, tuple(level2_values_all))
-    prev_l2_signature = st.session_state.get("__ov_l2_signature")
-    if (OV_L2_KEY not in st.session_state) or (prev_l2_signature != l2_signature):
-        st.session_state["__ov_l2_signature"] = l2_signature
-        st.session_state[OV_L2_KEY] = level2_values_all
-
-    preset_l2 = st.session_state.get(OV_L2_KEY, level2_values_all)
-    preset_l2 = [val for val in preset_l2 if val in level2_values_all]
-    if not preset_l2 and level2_values_all:
-        preset_l2 = level2_values_all
-        st.session_state[OV_L2_KEY] = preset_l2
-
-    level2_selected = st.multiselect(
-        "Filter Level 2 categories",
-        options=level2_values_all,
-        default=preset_l2,
-        key=OV_L2_KEY
-    )
-    level2_selected = [val for val in st.session_state.get(OV_L2_KEY, []) if val in level2_values_all]
-    if not level2_selected and level2_values_all:
-        level2_selected = level2_values_all
-
     # -----------------------------------
-    # Budget Sankey (after table) — respects Overview filters & snapshots
-    # -----------------------------------
-
-    viz_df = budget_df.copy()
-    if l1 in viz_df.columns and level1_selected:
-        viz_df = viz_df[viz_df[l1].astype(str).isin(level1_selected)]
-    if l2 in viz_df.columns and level2_selected:
-        viz_df = viz_df[viz_df[l2].astype(str).isin(level2_selected)]
-
-    val_to_use = val_col
-    use_lookup_snap = not lookup_df.empty and (l1 in viz_df.columns)
-
-    if normalize_for_sankey and use_lookup_snap:
-        df_norm = viz_df.merge(
-            lookup_df[["Level1", "Factor_per_month"]],
-            how="left",
-            left_on=l1,
-            right_on="Level1"
-        )
-        df_norm["Factor_per_month"] = pd.to_numeric(df_norm["Factor_per_month"], errors="coerce").fillna(1.0)
-        df_norm["_AmountMonthly"] = pd.to_numeric(df_norm[val_col], errors="coerce").fillna(0) * df_norm["Factor_per_month"]
-        val_to_use = "_AmountMonthly"
-    else:
-        df_norm = viz_df.copy()
-
-    try:
-        sankey_data = prepare_sankey_data(df_norm, l1=l1, l2=l2, l3=l3, value_col=val_to_use, l4=l4)
-
-        if not sankey_data["sources"]:
-            st.info("No flows to display for the current filters.")
-        elif chart_type == "Sankey (Plotly)":
-            fig = make_sankey_figure(sankey_data, title=f"{l1} \u2192 {l2} \u2192 {l3}" + (f" \u2192 {l4}" if l4 else ""))
-            fig.update_layout(template=PLOTLY_TEMPLATE)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            if chart_type.startswith("Sankey (ECharts") and "ech_curveness" not in locals():
-                ech_curveness, ech_edge_font = 0.5, 11
-            options = make_echarts_sankey_options(
-                sankey_data,
-                title=f"{l1} \u2192 {l2} \u2192 {l3}" + (f" \u2192 {l4}" if l4 else ""),
-                value_suffix=" $",
-                curveness=ech_curveness,
-                edge_font_size=int(ech_edge_font),
-                py_value_format=",.0f",
-            )
-            st_echarts(options=options, height="600px",theme=ECHR_THEME)
-    except Exception as e:
-        st.error(f"Could not render chart: {e}")
-else:
-    st.info("Guided Builder is active — budget Sankey is hidden until you finish or turn it off.")
-    # -----------------------------------
-    # Transactions (map & classify) — uploader is in sidebar
+    # Guided Budget Builder (step-by-step rows) — REACTIVE (no st.form)
     # -----------------------------------
     st.divider()
-    section_header("📥", "Transactions — classify & stage")
+    st.subheader("🧭 Guided Budget Builder")
 
-    tx_col1, tx_col2 = st.columns([2, 1])
+    # Fresh snapshots (no mutation yet)
+    _budget_df_snap, _tx_df_snap, _lookup_df_snap = get_snapshots(df_raw)
 
-    with tx_col1:
-        st.caption("Upload a transactions file in the **sidebar**, then map columns here.")
-        tx_file = st.session_state.get("tx_file_latest")  # from sidebar
+    # ---- Controls (start / factors / clear) ----
+    # Initialize all guide-related keys exactly once
+    st.session_state.setdefault("guide_active", False)
+    st.session_state.setdefault("guide_rows", [])
+    st.session_state.setdefault("show_factor_manager", False)
 
-        # Transaction mappings UI
-        tx_map = {}
-        if tx_file is not None:
-            try:
-                df_preview = read_table_any(tx_file)
-                tx_cols = list(df_preview.columns)
-            except Exception:
-                tx_cols = []
+    def _on_toggle_change():
+        # When turning the guide OFF, clear staged rows (optional)
+        if not st.session_state.get("guide_active", False):
+            st.session_state["guide_rows"].clear()
 
-            def _pick(lbl, candidates):
-                if not tx_cols:
-                    return None
-                for c in candidates:
-                    if c in tx_cols:
-                        return c
-                return tx_cols[0]
+    cols_head = st.columns([1, 1, 1, 2])
+    with cols_head[0]:
+        st.toggle(
+            "Start Guide",
+            key="guide_active",
+            help="Create rows step-by-step.",
+            on_change=_on_toggle_change
+        )
 
-            st.write("**Map transaction columns**")
-            tx_map["Date"] = st.selectbox("Date", tx_cols, index=tx_cols.index(_pick("Date", ["Date","Posting Date","Transaction Date"])) if tx_cols else 0)
-            tx_map["Description"] = st.selectbox("Description", tx_cols, index=tx_cols.index(_pick("Description", ["Description","Details","Narrative"])) if tx_cols else 0)
-            tx_map["Merchant"] = st.selectbox("Merchant (optional)", ["(none)"] + tx_cols, index=0)
-            tx_map["Merchant"] = None if tx_map["Merchant"] == "(none)" else tx_map["Merchant"]
-            tx_map["Account"] = st.selectbox("Account", tx_cols, index=tx_cols.index(_pick("Account", ["Account","Card","Account Name"])) if tx_cols else 0)
-            tx_map["Amount"] = st.selectbox("Amount", tx_cols, index=tx_cols.index(_pick("Amount", ["Amount","Value","Debit","Credit"])) if tx_cols else 0)
+    with cols_head[1]:
+        if st.button("Manage Factors ⚙️", use_container_width=True):
+            st.session_state["show_factor_manager"] = True
 
-            # Period selector (majority month)
-            if tx_cols:
+    with cols_head[2]:
+        # Use .get(...) so we don't KeyError before init
+        has_staged = bool(st.session_state.get("guide_rows", []))
+        if st.button("Clear staged rows 🧹", use_container_width=True, disabled=not has_staged):
+            st.session_state["guide_rows"].clear()
+            st.success("Cleared staged rows.")
+
+    # ===== When the guide is OFF, do not touch any frames =====
+    if not st.session_state["guide_active"]:
+        st.caption("💡 Turn **Start Guide** on to build rows step-by-step. Sankey charts stay visible while the guide is off.")
+    else:
+        # ===== Guide is ON: safe, local prep then persist only what’s needed =====
+        budget_df = _budget_df_snap.copy()
+        lookup_df = _lookup_df_snap.copy()
+
+        # Ensure Subcategory, Category Universe, Account columns (guide-only)
+        existing_subcat_col = _detect_subcategory_column(budget_df)
+        subcategory_col = existing_subcat_col or "Subcategory"
+        budget_df = _ensure_subcategory_column(budget_df, subcategory_col)
+
+        cu_col = (
+            st.session_state.get("cat_universe_col")
+            or st.session_state.get("cu_col_saved")
+            or "Category"
+        )
+        if cu_col not in budget_df.columns:
+            budget_df[cu_col] = ""
+
+        budget_account_col = _account_col_from_budget(budget_df) or "Account"
+        if budget_account_col not in budget_df.columns:
+            budget_df[budget_account_col] = ""
+
+        # Persist guide-prepared frame for downstream widgets that rely on it
+        st.session_state["ws_budget_df"] = budget_df
+
+        # L1 factors cache
+        if "guide_l1_factors" not in st.session_state:
+            st.session_state["guide_l1_factors"] = _load_l1_factors_from_lookup(lookup_df)
+        st.session_state.setdefault("guide_rows", [])
+
+        # ===== Factor manager =====
+        if st.session_state.get("show_factor_manager"):
+            with st.expander("Manage Level 1 Factors", expanded=True):
+                l1_factors = st.session_state["guide_l1_factors"]
+                if not l1_factors:
+                    st.info("No stored factors yet. Add some by creating rows or set them manually here.")
+                editable = [{"Level1": k, "Factor_per_month": v} for k, v in sorted(l1_factors.items())]
+                df_edit = pd.DataFrame(editable or [], columns=["Level1", "Factor_per_month"])
+                df_edit = st.data_editor(
+                    df_edit,
+                    num_rows="dynamic",
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Level1": st.column_config.TextColumn("Income by / Source"),
+                        "Factor_per_month": st.column_config.NumberColumn("Factor per month", step=0.05, format="%.2f"),
+                    }
+                )
+                c1, c2 = st.columns([1, 2])
+                with c1:
+                    if st.button("Save Factors", type="primary", use_container_width=True):
+                        new_map = {}
+                        for _, r in df_edit.iterrows():
+                            lvl = str(r["Level1"]).strip()
+                            fac = float(pd.to_numeric(r["Factor_per_month"], errors="coerce") or 1.0)
+                            if lvl:
+                                new_map[lvl] = fac
+                                lookup_df = _write_l1_factor(ws_id, lookup_df, lvl, fac)
+                        st.session_state["guide_l1_factors"] = new_map
+                        st.session_state["ws_lookup_df"] = lookup_df
+                        st.success("Factors saved.")
+                with c2:
+                    if st.button("Close"):
+                        st.session_state["show_factor_manager"] = False
+                        _rerun()
+
+        # ===== Helper: selectbox with instant "type new" input =====
+        def pick_or_type(label: str, options: list[str], key: str, placeholder: str = "Type new…"):
+            opts = ["— Type new —"] + options
+            sel = st.selectbox(label, options=opts, key=f"{key}_sel")
+            if sel == "— Type new —":
+                typed = st.text_input(" ", key=f"{key}_typed", placeholder=placeholder, label_visibility="collapsed")
+                return (typed.strip(), True) if typed else ("", True)
+            return (sel, False)
+
+        # ===== Guided inputs =====
+        st.markdown("Configure one row at a time. You can insert staged rows into the table when ready.")
+
+        existing_l1_vals = sorted(budget_df[l1].dropna().astype(str).unique().tolist()) if l1 in budget_df.columns else []
+        existing_categories = sorted(budget_df[cu_col].dropna().astype(str).unique().tolist()) if cu_col in budget_df.columns else []
+        existing_subs = sorted(budget_df[subcategory_col].dropna().astype(str).unique().tolist()) if subcategory_col in budget_df.columns else []
+        existing_accounts = sorted(budget_df[budget_account_col].dropna().astype(str).unique().tolist()) if budget_account_col in budget_df.columns else []
+
+        l1_col1, l1_col2 = st.columns([1, 1])
+        with l1_col1:
+            l1_val, l1_is_new = pick_or_type(
+                "Income by / Source (Level 1)",
+                list(dict.fromkeys(existing_l1_vals + DEFAULT_INCOME_SOURCES)),
+                key="guide_l1",
+                placeholder="e.g., Me / Partner / Side hustle"
+            )
+        with l1_col2:
+            factor_known = bool(l1_val) and (l1_val in st.session_state["guide_l1_factors"])
+            if l1_val and not factor_known:
+                st.info(f"Set a **monthly factor** for '{l1_val}'. Asked once and reused.")
+                presets = {"Monthly (1.0)": 1.0, "Bi-monthly (0.5)": 0.5, "Weekly (~4.3)": 4.3, "Custom": None}
+                preset_choice = st.selectbox("Preset", list(presets.keys()), index=0, key="guide_factor_preset")
+                custom_factor = None
+                if presets[preset_choice] is None:
+                    custom_factor = st.number_input("Custom factor per month", min_value=0.0, step=0.05, value=1.0, key="guide_factor_custom")
+                proposed_factor = presets[preset_choice] if presets[preset_choice] is not None else custom_factor
+                remember_factor = st.checkbox(f"Remember {proposed_factor or 1.0} for '{l1_val}'", value=True, key="guide_factor_remember")
+            else:
+                proposed_factor = st.session_state["guide_l1_factors"].get(l1_val, 1.0) if l1_val else 1.0
+                remember_factor = False
+
+        cat_col1, cat_col2 = st.columns([1, 1])
+        with cat_col1:
+            category_val, cat_is_new = pick_or_type(
+                f"Category ({cu_col})",
+                list(dict.fromkeys(flat_default_categories() + existing_categories)),
+                key="guide_cat",
+                placeholder="e.g., Groceries"
+            )
+        default_subs_for_cat = defaults_for(category_val) if category_val else []
+        with cat_col2:
+            sub_val, sub_is_new = pick_or_type(
+                f"Subcategory ({subcategory_col})",
+                list(dict.fromkeys(default_subs_for_cat + existing_subs)),
+                key="guide_sub",
+                placeholder="e.g., Pantry"
+            )
+
+        acc_col1, acc_col2 = st.columns([1, 1])
+        with acc_col1:
+            account_val, acc_is_new = pick_or_type(
+                f"Account ({budget_account_col})",
+                existing_accounts,
+                key="guide_acct",
+                placeholder="e.g., Checking"
+            )
+        with acc_col2:
+            amount_val = st.number_input("Amount (positive number)", min_value=0.0, step=10.0, value=0.0, key="guide_amount")
+
+        frc_col, note_col = st.columns([1, 1])
+        with frc_col:
+            freq_choice = st.selectbox("Frequency (helper)", ["Monthly", "Bi-monthly", "Weekly (~4.3)", "One-time", "Other"], index=0, key="guide_freq")
+        with note_col:
+            notes_val = st.text_input("Notes (optional)", placeholder="Add a short note", key="guide_notes")
+
+        st.caption("Quick apply")
+        qc1, qc2 = st.columns([1, 1])
+        apply_account_all = qc1.checkbox("Apply Account to all of this Category", value=False, key="guide_apply_acct_all")
+        apply_sub_all     = qc2.checkbox("Apply Subcategory to similar rows", value=False, key="guide_apply_sub_all")
+
+        if st.button("Stage row ➕", type="primary", key="guide_stage_btn"):
+            if not l1_val:
+                st.error("Please provide an Income Source (Level 1).")
+            elif not category_val:
+                st.error("Please choose or type a Category.")
+            elif amount_val <= 0:
+                st.error("Amount must be greater than zero.")
+            else:
+                # Save factor once
+                if l1_val and not factor_known and remember_factor and proposed_factor is not None:
+                    lookup_df = _write_l1_factor(ws_id, lookup_df, l1_val, float(proposed_factor))
+                    st.session_state["ws_lookup_df"] = lookup_df
+                    st.session_state["guide_l1_factors"][l1_val] = float(proposed_factor)
+
+                new_row = {col: "" for col in budget_df.columns}
+                if l1 in new_row: new_row[l1] = l1_val
+                new_row[cu_col] = category_val
+                new_row[subcategory_col] = sub_val
+                new_row[budget_account_col] = account_val
+                if val_col in new_row:
+                    new_row[val_col] = amount_val
+                if "Frequency" in new_row:
+                    new_row["Frequency"] = freq_choice
+                if "Notes" in new_row:
+                    note_text = notes_val
+                    if freq_choice and freq_choice != "Monthly":
+                        note_text = (note_text + f" [Freq: {freq_choice}]").strip()
+                    new_row["Notes"] = note_text
+
+                st.session_state["guide_rows"].append({
+                    "row": new_row,
+                    "apply_account_all": apply_account_all,
+                    "apply_sub_all": apply_sub_all,
+                    "l1": l1_val,
+                    "category": category_val,
+                    "subcategory": sub_val,
+                    "account": account_val,
+                })
+                st.success("Row staged. You can stage more, or insert them into the table below.")
+
+        # ---- Staged rows tray ----
+        staged = st.session_state["guide_rows"]
+        if staged:
+            st.markdown("#### 🗂️ Staged rows")
+            staged_df = pd.DataFrame([r["row"] for r in staged])
+            if val_col not in staged_df.columns:
+                staged_df[val_col] = 0.0
+            st.dataframe(staged_df, use_container_width=True)
+
+            i1, i2 = st.columns([1, 2])
+            with i1:
+                if st.button("Insert staged into Budget table ✅", type="primary", use_container_width=True, key="guide_insert_btn"):
+                    target_df = st.session_state.get("ws_budget_df", df_raw.copy())
+                    for col in staged_df.columns:
+                        if col not in target_df.columns:
+                            target_df[col] = ""
+                    target_df = pd.concat([target_df, staged_df[target_df.columns]], ignore_index=True)
+        
+                    for item in staged:
+                        if item["apply_account_all"] and item["category"]:
+                            mask = target_df[cu_col].astype(str).eq(item["category"])
+                            target_df.loc[mask, budget_account_col] = target_df.loc[mask, budget_account_col].replace("", item["account"])
+                        if item["apply_sub_all"] and item["subcategory"]:
+                            mask = target_df[cu_col].astype(str).eq(item["category"])
+                            target_df.loc[mask, subcategory_col] = target_df.loc[mask, subcategory_col].replace("", item["subcategory"])
+        
+                    # ✅ update our data snapshot
+                    st.session_state["ws_budget_df"] = target_df
+        
+                    # ✅ bump the editor revision so the data editor remounts with new data
+                    st.session_state["__editor_rev"] += 1
+        
+                    # clear staged and refresh UI
+                    st.session_state["guide_rows"] = []
+                    #st.session_state["guide_active"] = False
+                    st.success("Inserted staged rows into the budget table.")
+                    _rerun()
+
+            with i2:
+                st.caption("Tip: You can still edit cells in the main table and save to your workspace as usual.")
+
+    # Small hint while guide is on
+    if st.session_state["guide_active"]:
+        st.caption("💡 While the guide is on, Sankey charts are hidden so you can focus on building rows.")
+    if not st.session_state.get("guide_active", False):
+        # =========================
+        # Filters (Overview-only state keys)
+        # =========================
+        section_header("🪢 🔎", "Budget flow | Filters")
+
+        # ---------- NEW: use snapshots captured earlier ----------
+        budget_df = st.session_state.get("ws_budget_df", df_raw.copy())
+        tx_df     = st.session_state.get("ws_tx_df", st.session_state.get("tx_staged", pd.DataFrame()))
+        lookup_df = st.session_state.get("ws_lookup_df", pd.DataFrame(columns=LOOKUP_HEADERS))
+        cu_col    = st.session_state.get("cu_col_saved") or st.session_state.get("cat_universe_col")
+        # ---------------------------------------------------------
+
+        OV_L1_KEY   = "ov_level1_selected"
+        OV_L2_KEY   = "ov_level2_selected"
+        OV_NORM_KEY = "ov_normalize"
+
+        level1_values_all = sorted(budget_df[l1].dropna().astype(str).unique().tolist()) if l1 in budget_df.columns else []
+
+        l1_signature = (l1, tuple(level1_values_all))
+        prev_l1_signature = st.session_state.get("__ov_l1_signature")
+        if (OV_L1_KEY not in st.session_state) or (prev_l1_signature != l1_signature):
+            st.session_state["__ov_l1_signature"] = l1_signature
+            st.session_state[OV_L1_KEY] = level1_values_all
+
+        preset_l1 = st.session_state.get(OV_L1_KEY, level1_values_all)
+        preset_l1 = [val for val in preset_l1 if val in level1_values_all]
+        if not preset_l1 and level1_values_all:
+            preset_l1 = level1_values_all
+            st.session_state[OV_L1_KEY] = preset_l1
+
+        col_f1, col_f3 = st.columns([3, 1])
+        with col_f1:
+            level1_selected = st.multiselect(
+                "Filter Level 1 categories",
+                options=level1_values_all,
+                default=preset_l1,
+                key=OV_L1_KEY,
+                help="Filter the dataset by the mapped Level 1 column."
+            )
+            level1_selected = [val for val in st.session_state.get(OV_L1_KEY, []) if val in level1_values_all]
+            if not level1_selected and level1_values_all:
+                level1_selected = level1_values_all
+
+        with col_f3:
+            normalize_for_sankey = st.checkbox(
+                "Normalize to monthly",
+                value=True,
+                key=OV_NORM_KEY,
+                help="Convert values to monthly equivalents using the per-workspace lookup."
+            )
+
+        if l1 in budget_df.columns and l2 in budget_df.columns:
+            df_for_l2 = budget_df[budget_df[l1].astype(str).isin(level1_selected)] if level1_selected else budget_df
+            level2_values_all = sorted(df_for_l2[l2].dropna().astype(str).unique().tolist())
+        else:
+            level2_values_all = []
+
+        l2_signature = (l1, l2, tuple(level2_values_all))
+        prev_l2_signature = st.session_state.get("__ov_l2_signature")
+        if (OV_L2_KEY not in st.session_state) or (prev_l2_signature != l2_signature):
+            st.session_state["__ov_l2_signature"] = l2_signature
+            st.session_state[OV_L2_KEY] = level2_values_all
+
+        preset_l2 = st.session_state.get(OV_L2_KEY, level2_values_all)
+        preset_l2 = [val for val in preset_l2 if val in level2_values_all]
+        if not preset_l2 and level2_values_all:
+            preset_l2 = level2_values_all
+            st.session_state[OV_L2_KEY] = preset_l2
+
+        level2_selected = st.multiselect(
+            "Filter Level 2 categories",
+            options=level2_values_all,
+            default=preset_l2,
+            key=OV_L2_KEY
+        )
+        level2_selected = [val for val in st.session_state.get(OV_L2_KEY, []) if val in level2_values_all]
+        if not level2_selected and level2_values_all:
+            level2_selected = level2_values_all
+
+        # -----------------------------------
+        # Budget Sankey (after table) — respects Overview filters & snapshots
+        # -----------------------------------
+
+        viz_df = budget_df.copy()
+        if l1 in viz_df.columns and level1_selected:
+            viz_df = viz_df[viz_df[l1].astype(str).isin(level1_selected)]
+        if l2 in viz_df.columns and level2_selected:
+            viz_df = viz_df[viz_df[l2].astype(str).isin(level2_selected)]
+
+        val_to_use = val_col
+        use_lookup_snap = not lookup_df.empty and (l1 in viz_df.columns)
+
+        if normalize_for_sankey and use_lookup_snap:
+            df_norm = viz_df.merge(
+                lookup_df[["Level1", "Factor_per_month"]],
+                how="left",
+                left_on=l1,
+                right_on="Level1"
+            )
+            df_norm["Factor_per_month"] = pd.to_numeric(df_norm["Factor_per_month"], errors="coerce").fillna(1.0)
+            df_norm["_AmountMonthly"] = pd.to_numeric(df_norm[val_col], errors="coerce").fillna(0) * df_norm["Factor_per_month"]
+            val_to_use = "_AmountMonthly"
+        else:
+            df_norm = viz_df.copy()
+
+        try:
+            sankey_data = prepare_sankey_data(df_norm, l1=l1, l2=l2, l3=l3, value_col=val_to_use, l4=l4)
+
+            if not sankey_data["sources"]:
+                st.info("No flows to display for the current filters.")
+            elif chart_type == "Sankey (Plotly)":
+                fig = make_sankey_figure(sankey_data, title=f"{l1} \u2192 {l2} \u2192 {l3}" + (f" \u2192 {l4}" if l4 else ""))
+                fig.update_layout(template=PLOTLY_TEMPLATE)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                if chart_type.startswith("Sankey (ECharts") and "ech_curveness" not in locals():
+                    ech_curveness, ech_edge_font = 0.5, 11
+                options = make_echarts_sankey_options(
+                    sankey_data,
+                    title=f"{l1} \u2192 {l2} \u2192 {l3}" + (f" \u2192 {l4}" if l4 else ""),
+                    value_suffix=" $",
+                    curveness=ech_curveness,
+                    edge_font_size=int(ech_edge_font),
+                    py_value_format=",.0f",
+                )
+                st_echarts(options=options, height="600px",theme=ECHR_THEME)
+        except Exception as e:
+            st.error(f"Could not render chart: {e}")
+    else:
+        st.info("Guided Builder is active — budget Sankey is hidden until you finish or turn it off.")
+    if not st.session_state.get("guide_active", False):    
+        # -----------------------------------
+        # Transactions (map & classify) — uploader is in sidebar
+        # -----------------------------------
+        st.divider()
+        section_header("📥", "Transactions — classify & stage")
+
+        tx_col1, tx_col2 = st.columns([2, 1])
+
+        with tx_col1:
+            st.caption("Upload a transactions file in the **sidebar**, then map columns here.")
+            tx_file = st.session_state.get("tx_file_latest")  # from sidebar
+
+            # Transaction mappings UI
+            tx_map = {}
+            if tx_file is not None:
                 try:
-                    dt_preview = pd.to_datetime(df_preview[tx_map["Date"]], errors="coerce")
-                    ym_preview = dt_preview.dt.to_period("M").astype(str)
-                    counts = ym_preview.value_counts()
-                    period_suggest = counts.idxmax() if not counts.empty else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
-                    period_options = sorted(ym_preview.dropna().unique().tolist())
-                    if period_suggest not in period_options:
-                        period_options = sorted(set(period_options + [period_suggest]))
+                    df_preview = read_table_any(tx_file)
+                    tx_cols = list(df_preview.columns)
                 except Exception:
+                    tx_cols = []
+
+                def _pick(lbl, candidates):
+                    if not tx_cols:
+                        return None
+                    for c in candidates:
+                        if c in tx_cols:
+                            return c
+                    return tx_cols[0]
+
+                st.write("**Map transaction columns**")
+                tx_map["Date"] = st.selectbox("Date", tx_cols, index=tx_cols.index(_pick("Date", ["Date","Posting Date","Transaction Date"])) if tx_cols else 0)
+                tx_map["Description"] = st.selectbox("Description", tx_cols, index=tx_cols.index(_pick("Description", ["Description","Details","Narrative"])) if tx_cols else 0)
+                tx_map["Merchant"] = st.selectbox("Merchant (optional)", ["(none)"] + tx_cols, index=0)
+                tx_map["Merchant"] = None if tx_map["Merchant"] == "(none)" else tx_map["Merchant"]
+                tx_map["Account"] = st.selectbox("Account", tx_cols, index=tx_cols.index(_pick("Account", ["Account","Card","Account Name"])) if tx_cols else 0)
+                tx_map["Amount"] = st.selectbox("Amount", tx_cols, index=tx_cols.index(_pick("Amount", ["Amount","Value","Debit","Credit"])) if tx_cols else 0)
+
+                # Period selector (majority month)
+                if tx_cols:
+                    try:
+                        dt_preview = pd.to_datetime(df_preview[tx_map["Date"]], errors="coerce")
+                        ym_preview = dt_preview.dt.to_period("M").astype(str)
+                        counts = ym_preview.value_counts()
+                        period_suggest = counts.idxmax() if not counts.empty else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
+                        period_options = sorted(ym_preview.dropna().unique().tolist())
+                        if period_suggest not in period_options:
+                            period_options = sorted(set(period_options + [period_suggest]))
+                        # --- Code to add the next period starts here ---
+                        if period_options:
+                            # Get the last period in the sorted list
+                            last_period_str = period_options[-1]
+                            # Convert the string to a pandas Period object
+                            last_period = pd.Period(last_period_str, freq='M')
+                            # Advance the period by one month
+                            next_period = last_period + 1
+                            # Convert the next period back to the 'YYYY-MM' string format
+                            next_period_str = next_period.strftime("%Y-%m")
+                            # Add the next period to the options list
+                            if next_period_str not in period_options:
+                                period_options.append(next_period_str)
+                        # --- Code to add the next period ends here ---
+                    except Exception:
+                        period_suggest = pd.Timestamp.today().to_period("M").strftime("%Y-%m")
+                        period_options = [period_suggest]
+                else:
                     period_suggest = pd.Timestamp.today().to_period("M").strftime("%Y-%m")
                     period_options = [period_suggest]
-            else:
-                period_suggest = pd.Timestamp.today().to_period("M").strftime("%Y-%m")
-                period_options = [period_suggest]
 
-            selected_period = st.selectbox(
-                "Period for this upload (YYYY-MM)",
-                options=period_options or [period_suggest],
-                index=(period_options.index(period_suggest) if period_suggest in period_options else 0),
-                key="tx_period_select",
-                help="We suggest the calendar month (YYYY-MM) that appears most often in the file’s dates. You can override it."
-            )
+                selected_period = st.selectbox(
+                    "Period for this upload (YYYY-MM)",
+                    options=period_options or [period_suggest],
+                    index=(period_options.index(period_suggest) if period_suggest in period_options else 0),
+                    key="tx_period_select",
+                    help="We suggest the calendar month (YYYY-MM) that appears most often in the file’s dates. You can override it."
+                )
 
-            if st.button("Parse & stage transactions", type="primary"):
-                try:
-                    df_tx = read_transactions_file(tx_file, tx_map)
+                if st.button("Parse & stage transactions", type="primary"):
+                    try:
+                        df_tx = read_transactions_file(tx_file, tx_map)
 
-                    if "Notes" not in df_tx.columns:
-                        df_tx["Notes"] = ""
+                        if "Notes" not in df_tx.columns:
+                            df_tx["Notes"] = ""
 
-                    sel_period = st.session_state.get("tx_period_select")
-                    if not sel_period:
-                        dt_tx = pd.to_datetime(df_tx["Date"], errors="coerce")
-                        ym_tx = dt_tx.dt.to_period("M").astype(str)
-                        counts_tx = ym_tx.value_counts()
-                        sel_period = counts_tx.idxmax() if not counts_tx.empty else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
-                    df_tx["Period"] = str(sel_period)
+                        sel_period = st.session_state.get("tx_period_select")
+                        if not sel_period:
+                            dt_tx = pd.to_datetime(df_tx["Date"], errors="coerce")
+                            ym_tx = dt_tx.dt.to_period("M").astype(str)
+                            counts_tx = ym_tx.value_counts()
+                            sel_period = counts_tx.idxmax() if not counts_tx.empty else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
+                        df_tx["Period"] = str(sel_period)
 
-                    df_tx = _ensure_tx_id(df_tx)
+                        df_tx = _ensure_tx_id(df_tx)
 
-                    cu_col = st.session_state.get("cat_universe_col") or (read_category_universe(ws_id) if ws_id else None)
-                    if cu_col in edited_df.columns:
-                        category_universe = sorted(
-                            edited_df[cu_col].dropna().astype(str).str.strip().unique().tolist()
-                        )
-                    else:
-                        category_universe = []
-
-                    if "AssignedCategory" not in df_tx.columns:
-                        df_tx["AssignedCategory"] = ""
-
-                    if ws_id:
-                        try:
-                            df_mem = read_merchants(ws_id)  # MerchantKey, AssignedCategory
-                        except Exception:
-                            df_mem = pd.DataFrame(columns=["MerchantKey", "AssignedCategory"])
-                    else:
-                        df_mem = pd.DataFrame(columns=["MerchantKey", "AssignedCategory"])
-
-                    if not df_mem.empty:
-                        mem_map = (
-                            df_mem.dropna()
-                            .assign(
-                                MerchantKey=lambda d: d["MerchantKey"].astype(str)
-                                    .str.lower()
-                                    .str.replace("/", " ", regex=False)
-                                    .str.replace(r"\s+", " ", regex=True)
-                                    .str.strip(),
-                                AssignedCategory=lambda d: d["AssignedCategory"].astype(str).str.strip(),
+                        cu_col = st.session_state.get("cat_universe_col") or (read_category_universe(ws_id) if ws_id else None)
+                        if cu_col in edited_df.columns:
+                            category_universe = sorted(
+                                edited_df[cu_col].dropna().astype(str).str.strip().unique().tolist()
                             )
-                            .drop_duplicates(subset=["MerchantKey"], keep="last")
-                            .set_index("MerchantKey")["AssignedCategory"]
-                            .to_dict()
-                        )
-                    else:
-                        mem_map = {}
-
-                    mk = df_tx["Merchant"].astype(str).fillna("") \
-                            .str.lower() \
-                            .str.replace("/", " ", regex=False) \
-                            .str.replace(r"\s+", " ", regex=True) \
-                            .str.strip()
-
-                    proposed_mem = mk.map(mem_map).fillna("")
-                    mask_empty = df_tx["AssignedCategory"].astype(str).fillna("").str.strip().isin(["","Uncategorized"])
-                    df_tx.loc[mask_empty & proposed_mem.ne(""), "AssignedCategory"] = proposed_mem[mask_empty & proposed_mem.ne("")]
-
-                    if category_universe:
-                        joined_text = (
-                            df_tx["Description"].fillna("").astype(str) + " " +
-                            df_tx["Merchant"].fillna("").astype(str)
-                        ).str.lower().str.replace("/", " ", regex=False).str.replace(r"\s+", " ", regex=True).str.strip()
-
-                        still_empty = df_tx["AssignedCategory"].astype(str).fillna("").str.strip().eq("")
-                        idxs = still_empty[still_empty].index.tolist()
-                        if idxs:
-                            for idx in idxs:
-                                label, score = _suggest_category_universe_with_score(joined_text.loc[idx], category_universe, cutoff=60)
-                                if label:
-                                    df_tx.at[idx, "AssignedCategory"] = label
-
-                    st.session_state["tx_staged"] = df_tx
-                    st.session_state["ws_tx_df"] = df_tx.copy()  # keep Overview current
-                    st.session_state["tx_universe"] = category_universe
-                    st.success(f"Parsed {len(df_tx):,} transactions. Scroll down to edit & save.")
-
-                except Exception as e:
-                    st.error(f"Parse failed: {e}")
-                    print(f"[PARSE-ERR] {e}")
-
-    with tx_col2:
-        st.caption("Load/save from your workspace")
-        if ws_id:
-            if st.button("Load transactions from workspace"):
-                try:
-                    txws = read_transactions(ws_id)
-                    st.session_state["tx_staged"] = txws
-                    st.session_state["ws_tx_df"] = txws.copy()  # keep Overview current
-                    cu_col = st.session_state.get("cat_universe_col") or (read_category_universe(ws_id) if ws_id else None)
-                    if cu_col in edited_df.columns:
-                        st.session_state["tx_universe"] = sorted(edited_df[cu_col].dropna().astype(str).str.strip().unique().tolist())
-                    else:
-                        st.session_state["tx_universe"] = []
-                    st.success("Transactions loaded.")
-                except Exception as e:
-                    st.error(f"Load failed: {e}")
-        else:
-            st.info("Enter a Workspace ID to enable load/save.")
-
-    # -----------------------------------
-    # Transactions table (sortable) + filter + save/apply
-    # -----------------------------------
-    if "tx_staged" in st.session_state:
-        st.divider()
-        section_header("📋", "Transactions table")
-
-        base_df = st.session_state["tx_staged"].copy()
-        universe = st.session_state.get("tx_universe", [])
-
-        for col in ["AssignedCategory","Period","Notes"]:
-            if col not in base_df.columns:
-                base_df[col] = ""
-
-        with st.expander("Filter rows (Transactions)", expanded=False):
-            q_tx = st.text_input("Search text (all columns)", key="q_tx").strip().lower()
-            col_filter_tx = st.selectbox("Filter by column (optional)", options=["(none)"] + list(base_df.columns), index=0, key="col_filter_tx")
-            val_filter_tx = ""
-            if col_filter_tx and col_filter_tx != "(none)":
-                val_filter_tx = st.text_input(f"Show rows where **{col_filter_tx}** contains:", key="val_filter_tx").strip().lower()
-
-        col_cfg = {
-            "AssignedCategory": st.column_config.SelectboxColumn(
-                "AssignedCategory",
-                options=universe or ["Uncategorized"],
-                required=False
-            ),
-            "Period": st.column_config.TextColumn("Period (YYYY-MM)"),
-            "Notes": st.column_config.TextColumn("Notes"),
-        }
-
-        with st.form("tx_edit_form", clear_on_submit=False):
-            st.caption("Tip: edit as many cells as you want; changes apply on submit.")
-            df_tx_form = st.data_editor(
-                base_df,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="tx_editor",
-                column_config=col_cfg
-            )
-            fcol1, fcol2 = st.columns([1,1])
-            save_clicked = fcol1.form_submit_button("Save transactions to workspace", type="primary", use_container_width=True)
-            apply_clicked = fcol2.form_submit_button("Apply edits (keep local)", use_container_width=True)
-
-        df_tx_preview = df_tx_form.copy()
-        if q_tx:
-            df_tx_preview = df_tx_preview[df_tx_preview.apply(lambda r: q_tx in str(r.values).lower(), axis=1)]
-        if col_filter_tx and col_filter_tx != "(none)" and val_filter_tx:
-            df_tx_preview = df_tx_preview[df_tx_preview[col_filter_tx].astype(str).str.lower().str.contains(val_filter_tx, na=False)]
-
-#        st.caption("Preview (filtered)")
-#        st.dataframe(df_tx_preview, use_container_width=True)
-
-        if apply_clicked:
-            st.session_state["tx_staged"] = df_tx_form
-            st.session_state["ws_tx_df"] = df_tx_form.copy()  # keep Overview current
-            st.success("Edits applied locally.")
-            st.rerun()
-
-        if save_clicked and ws_id:
-            try:
-                df_to_save = df_tx_form.copy()
-
-                uni = st.session_state.get("tx_universe", [])
-                if uni:
-                    bad = ~df_to_save["AssignedCategory"].isin(["", *uni])
-                    n_bad = int(bad.sum())
-                    if n_bad:
-                        st.warning(f"{n_bad} rows have categories not in the Category Universe; they were set to 'Uncategorized'.")
-                        df_to_save.loc[bad, "AssignedCategory"] = "Uncategorized"
-
-                df_to_save = _ensure_tx_id(df_to_save)
-
-                try:
-                    existing = read_transactions(ws_id)
-                except Exception:
-                    existing = pd.DataFrame()
-
-                if existing is None or existing.empty:
-                    combined = df_to_save.copy()
-                    prev_rows = 0
-                else:
-                    existing = _ensure_tx_id(existing.copy())
-                    prev_rows = len(existing)
-                    combined = pd.concat([existing, df_to_save], ignore_index=True)
-                    combined = combined.drop_duplicates(subset=["TX_ID"], keep="last")
-
-                write_transactions(ws_id, combined)
-
-                added_rows = max(0, len(combined) - prev_rows)
-                st.info(f"Appended {added_rows} new transactions. Total now: {len(combined):,}.")
-
-                try:
-                    if {"Merchant", "AssignedCategory"}.issubset(df_to_save.columns):
-                        df_mem = df_to_save[["Merchant", "AssignedCategory"]].copy()
-                        df_mem["AssignedCategory"] = df_mem["AssignedCategory"].astype(str).str.strip()
-                        df_mem = df_mem[(df_mem["AssignedCategory"] != "") & (df_mem["AssignedCategory"].str.lower() != "uncategorized")]
-                        df_mem["MerchantKey"] = (
-                            df_mem["Merchant"].astype(str)
-                            .str.lower()
-                            .str.replace("/", " ", regex=False)
-                            .str.replace(r"\s+", " ", regex=True)
-                            .str.strip()
-                        )
-                        df_mem = df_mem[df_mem["MerchantKey"] != ""]
-                        df_mem = df_mem[["MerchantKey", "AssignedCategory"]].drop_duplicates(subset=["MerchantKey"], keep="last")
-
-                        base_mem = read_merchants(ws_id)
-                        if base_mem is None or base_mem.empty:
-                            merged = df_mem
                         else:
-                            base_mem = base_mem[["MerchantKey", "AssignedCategory"]].dropna(how="any")
-                            base_mem["MerchantKey"] = (
-                                base_mem["MerchantKey"].astype(str)
+                            category_universe = []
+
+                        if "AssignedCategory" not in df_tx.columns:
+                            df_tx["AssignedCategory"] = ""
+
+                        if ws_id:
+                            try:
+                                df_mem = read_merchants(ws_id)  # MerchantKey, AssignedCategory
+                            except Exception:
+                                df_mem = pd.DataFrame(columns=["MerchantKey", "AssignedCategory"])
+                        else:
+                            df_mem = pd.DataFrame(columns=["MerchantKey", "AssignedCategory"])
+
+                        if not df_mem.empty:
+                            mem_map = (
+                                df_mem.dropna()
+                                .assign(
+                                    MerchantKey=lambda d: d["MerchantKey"].astype(str)
+                                        .str.lower()
+                                        .str.replace("/", " ", regex=False)
+                                        .str.replace(r"\s+", " ", regex=True)
+                                        .str.strip(),
+                                    AssignedCategory=lambda d: d["AssignedCategory"].astype(str).str.strip(),
+                                )
+                                .drop_duplicates(subset=["MerchantKey"], keep="last")
+                                .set_index("MerchantKey")["AssignedCategory"]
+                                .to_dict()
+                            )
+                        else:
+                            mem_map = {}
+
+                        mk = df_tx["Merchant"].astype(str).fillna("") \
+                                .str.lower() \
+                                .str.replace("/", " ", regex=False) \
+                                .str.replace(r"\s+", " ", regex=True) \
+                                .str.strip()
+
+                        proposed_mem = mk.map(mem_map).fillna("")
+                        mask_empty = df_tx["AssignedCategory"].astype(str).fillna("").str.strip().isin(["","Uncategorized"])
+                        df_tx.loc[mask_empty & proposed_mem.ne(""), "AssignedCategory"] = proposed_mem[mask_empty & proposed_mem.ne("")]
+
+                        if category_universe:
+                            joined_text = (
+                                df_tx["Description"].fillna("").astype(str) + " " +
+                                df_tx["Merchant"].fillna("").astype(str)
+                            ).str.lower().str.replace("/", " ", regex=False).str.replace(r"\s+", " ", regex=True).str.strip()
+
+                            still_empty = df_tx["AssignedCategory"].astype(str).fillna("").str.strip().eq("")
+                            idxs = still_empty[still_empty].index.tolist()
+                            if idxs:
+                                for idx in idxs:
+                                    label, score = _suggest_category_universe_with_score(joined_text.loc[idx], category_universe, cutoff=60)
+                                    if label:
+                                        df_tx.at[idx, "AssignedCategory"] = label
+
+                        st.session_state["tx_staged"] = df_tx
+                        st.session_state["ws_tx_df"] = df_tx.copy()  # keep Overview current
+                        st.session_state["tx_universe"] = category_universe
+                        st.success(f"Parsed {len(df_tx):,} transactions. Scroll down to edit & save.")
+
+                    except Exception as e:
+                        st.error(f"Parse failed: {e}")
+                        print(f"[PARSE-ERR] {e}")
+
+        with tx_col2:
+            st.caption("Load/save from your workspace")
+            if ws_id:
+                if st.button("Load transactions from workspace"):
+                    try:
+                        txws = read_transactions(ws_id)
+                        st.session_state["tx_staged"] = txws
+                        st.session_state["ws_tx_df"] = txws.copy()  # keep Overview current
+                        cu_col = st.session_state.get("cat_universe_col") or (read_category_universe(ws_id) if ws_id else None)
+                        if cu_col in edited_df.columns:
+                            st.session_state["tx_universe"] = sorted(edited_df[cu_col].dropna().astype(str).str.strip().unique().tolist())
+                        else:
+                            st.session_state["tx_universe"] = []
+                        st.success("Transactions loaded.")
+                    except Exception as e:
+                        st.error(f"Load failed: {e}")
+            else:
+                st.info("Enter a Workspace ID to enable load/save.")
+
+        # -----------------------------------
+        # Transactions table (sortable) + filter + save/apply
+        # -----------------------------------
+        if "tx_staged" in st.session_state:
+            st.divider()
+            section_header("📋", "Transactions table")
+
+            base_df = st.session_state["tx_staged"].copy()
+            universe = st.session_state.get("tx_universe", [])
+
+            for col in ["AssignedCategory","Period","Notes"]:
+                if col not in base_df.columns:
+                    base_df[col] = ""
+
+            with st.expander("Filter rows (Transactions)", expanded=False):
+                q_tx = st.text_input("Search text (all columns)", key="q_tx").strip().lower()
+                col_filter_tx = st.selectbox("Filter by column (optional)", options=["(none)"] + list(base_df.columns), index=0, key="col_filter_tx")
+                val_filter_tx = ""
+                if col_filter_tx and col_filter_tx != "(none)":
+                    val_filter_tx = st.text_input(f"Show rows where **{col_filter_tx}** contains:", key="val_filter_tx").strip().lower()
+
+            col_cfg = {
+                "AssignedCategory": st.column_config.SelectboxColumn(
+                    "AssignedCategory",
+                    options=universe or ["Uncategorized"],
+                    required=False
+                ),
+                "Period": st.column_config.TextColumn("Period (YYYY-MM)"),
+                "Notes": st.column_config.TextColumn("Notes"),
+            }
+
+            with st.form("tx_edit_form", clear_on_submit=False):
+                st.caption("Tip: edit as many cells as you want; changes apply on submit.")
+                df_tx_form = st.data_editor(
+                    base_df,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="tx_editor",
+                    column_config=col_cfg
+                )
+                fcol1, fcol2 = st.columns([1,1])
+                save_clicked = fcol1.form_submit_button("Save transactions to workspace", type="primary", use_container_width=True)
+                apply_clicked = fcol2.form_submit_button("Apply edits (keep local)", use_container_width=True)
+
+            df_tx_preview = df_tx_form.copy()
+            if q_tx:
+                df_tx_preview = df_tx_preview[df_tx_preview.apply(lambda r: q_tx in str(r.values).lower(), axis=1)]
+            if col_filter_tx and col_filter_tx != "(none)" and val_filter_tx:
+                df_tx_preview = df_tx_preview[df_tx_preview[col_filter_tx].astype(str).str.lower().str.contains(val_filter_tx, na=False)]
+
+    #        st.caption("Preview (filtered)")
+    #        st.dataframe(df_tx_preview, use_container_width=True)
+
+            if apply_clicked:
+                st.session_state["tx_staged"] = df_tx_form
+                st.session_state["ws_tx_df"] = df_tx_form.copy()  # keep Overview current
+                st.success("Edits applied locally.")
+                st.rerun()
+
+            if save_clicked and ws_id:
+                try:
+                    df_to_save = df_tx_form.copy()
+
+                    uni = st.session_state.get("tx_universe", [])
+                    if uni:
+                        bad = ~df_to_save["AssignedCategory"].isin(["", *uni])
+                        n_bad = int(bad.sum())
+                        if n_bad:
+                            st.warning(f"{n_bad} rows have categories not in the Category Universe; they were set to 'Uncategorized'.")
+                            df_to_save.loc[bad, "AssignedCategory"] = "Uncategorized"
+
+                    df_to_save = _ensure_tx_id(df_to_save)
+
+                    try:
+                        existing = read_transactions(ws_id)
+                    except Exception:
+                        existing = pd.DataFrame()
+
+                    if existing is None or existing.empty:
+                        combined = df_to_save.copy()
+                        prev_rows = 0
+                    else:
+                        existing = _ensure_tx_id(existing.copy())
+                        prev_rows = len(existing)
+                        combined = pd.concat([existing, df_to_save], ignore_index=True)
+                        combined = combined.drop_duplicates(subset=["TX_ID"], keep="last")
+
+                    write_transactions(ws_id, combined)
+
+                    added_rows = max(0, len(combined) - prev_rows)
+                    st.info(f"Appended {added_rows} new transactions. Total now: {len(combined):,}.")
+
+                    try:
+                        if {"Merchant", "AssignedCategory"}.issubset(df_to_save.columns):
+                            df_mem = df_to_save[["Merchant", "AssignedCategory"]].copy()
+                            df_mem["AssignedCategory"] = df_mem["AssignedCategory"].astype(str).str.strip()
+                            df_mem = df_mem[(df_mem["AssignedCategory"] != "") & (df_mem["AssignedCategory"].str.lower() != "uncategorized")]
+                            df_mem["MerchantKey"] = (
+                                df_mem["Merchant"].astype(str)
                                 .str.lower()
                                 .str.replace("/", " ", regex=False)
                                 .str.replace(r"\s+", " ", regex=True)
                                 .str.strip()
                             )
-                            base_mem["AssignedCategory"] = base_mem["AssignedCategory"].astype(str).str.strip()
-                            base_mem = base_mem[(base_mem["MerchantKey"] != "") & (base_mem["AssignedCategory"] != "")]
-                            base_mem = base_mem.drop_duplicates(subset=["MerchantKey"], keep="last")
-                            merged = pd.concat([base_mem, df_mem], ignore_index=True)
+                            df_mem = df_mem[df_mem["MerchantKey"] != ""]
+                            df_mem = df_mem[["MerchantKey", "AssignedCategory"]].drop_duplicates(subset=["MerchantKey"], keep="last")
 
-                        merged = merged.dropna().drop_duplicates(subset=["MerchantKey"], keep="last")
-                        write_merchants(ws_id, merged)
-                except Exception as e:
-                    print(f"[MEM-WRITE-ERR] {e}")
-
-                st.session_state["tx_staged"] = df_tx_form
-                st.session_state["ws_tx_df"] = df_tx_form.copy()  # keep Overview current
-                st.success("Transactions saved to workspace.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Save failed: {e}")
-
-        c2, c3 = st.columns([1,1])
-        with c2:
-            if st.button("Clear staged transactions"):
-                st.session_state.pop("tx_staged", None)
-                st.session_state.pop("tx_universe", None)
-                st.session_state["ws_tx_df"] = pd.DataFrame()  # keep Overview current
-                st.info("Cleared staged transactions.")
-                st.rerun()
-
-        with c3:
-            overwrite_filled = st.checkbox(
-                "Overwrite filled",
-                value=False,
-                help="If checked, memory + fuzzy will recompute for all rows. If off, only empty AssignedCategory cells are filled."
-            )
-            try:
-                df_tx_prev = st.session_state.get("tx_staged", pd.DataFrame()).copy()
-                universe = st.session_state.get("tx_universe", [])
-                if df_tx_prev.empty or not universe:
-                    st.info("No staged transactions or Category Universe to compute against.")
-                else:
-                    if "AssignedCategory" not in df_tx_prev.columns:
-                        df_tx_prev["AssignedCategory"] = ""
-                    cur_assigned = df_tx_prev["AssignedCategory"].astype(str).fillna("").str.strip()
-                    mask_target = pd.Series(True, index=df_tx_prev.index) if overwrite_filled else cur_assigned.isin(["","Uncategorized"])
-                    total_target = int(mask_target.sum())
-
-                    if ws_id:
-                        try:
-                            df_mem_prev = read_merchants(ws_id)
-                        except Exception:
-                            df_mem_prev = pd.DataFrame(columns=["MerchantKey","AssignedCategory"])
-                    else:
-                        df_mem_prev = pd.DataFrame(columns=["MerchantKey","AssignedCategory"])
-
-                    mem_map = {}
-                    if not df_mem_prev.empty:
-                        mem_map = (
-                            df_mem_prev.dropna()
-                            .assign(
-                                MerchantKey=lambda d: d["MerchantKey"].astype(str)
+                            base_mem = read_merchants(ws_id)
+                            if base_mem is None or base_mem.empty:
+                                merged = df_mem
+                            else:
+                                base_mem = base_mem[["MerchantKey", "AssignedCategory"]].dropna(how="any")
+                                base_mem["MerchantKey"] = (
+                                    base_mem["MerchantKey"].astype(str)
                                     .str.lower()
                                     .str.replace("/", " ", regex=False)
                                     .str.replace(r"\s+", " ", regex=True)
-                                    .str.strip(),
-                                AssignedCategory=lambda d: d["AssignedCategory"].astype(str).str.strip()
-                            )
-                            .drop_duplicates(subset=["MerchantKey"], keep="last")
-                            .set_index("MerchantKey")["AssignedCategory"]
-                            .to_dict()
-                        )
-
-                    local_pairs = df_tx_prev[["Merchant", "AssignedCategory"]].copy()
-                    local_pairs["AssignedCategory"] = local_pairs["AssignedCategory"].astype(str).str.strip()
-                    local_pairs = local_pairs[(local_pairs["AssignedCategory"] != "") & (local_pairs["AssignedCategory"].str.lower() != "uncategorized")]
-                    local_pairs["MerchantKey"] = (
-                        local_pairs["Merchant"].astype(str)
-                        .str.lower()
-                        .str.replace("/", " ", regex=False)
-                        .str.replace(r"\s+", " ", regex=True)
-                        .str.strip()
-                    )
-                    local_pairs = local_pairs[local_pairs["MerchantKey"] != ""]
-                    local_map = (
-                        local_pairs.drop_duplicates(subset=["MerchantKey"], keep="last")
-                        .set_index("MerchantKey")["AssignedCategory"].to_dict()
-                    )
-                    if local_map:
-                        mem_map.update(local_map)
-
-                    mk = df_tx_prev["Merchant"].astype(str) \
-                            .str.lower() \
-                            .str.replace("/", " ", regex=False) \
-                            .str.replace(r"\s+", " ", regex=True) \
-                            .str.strip()
-                    proposed_mem = mk.map(mem_map).fillna("")
-                    mem_fill_mask = mask_target & proposed_mem.ne("")
-                    memory_hits = int(mem_fill_mask.sum())
-
-                    after_mem_assigned = cur_assigned.where(~mem_fill_mask, proposed_mem)
-
-                    fuzzy_hits = 0
-                    unmatched_mask = mask_target & after_mem_assigned.eq("")
-                    if int(unmatched_mask.sum()) > 0:
-                        joined_text_prev = (
-                            df_tx_prev["Description"].fillna("").astype(str) + " " +
-                            df_tx_prev["Merchant"].fillna("").astype(str)
-                        ).str.lower().str.replace("/", " ", regex=False).str.replace(r"\s+", " ", regex=True).str.strip()
-
-                        idxs = unmatched_mask[unmatched_mask].index.tolist()
-                        fuzzy_labels = {}
-                        for idx in idxs:
-                            label, score = _suggest_category_universe_with_score(
-                                joined_text_prev.loc[idx], universe, cutoff=60
-                            )
-                            if label:
-                                fuzzy_labels[idx] = label
-                        fuzzy_hits = len(fuzzy_labels)
-                    else:
-                        fuzzy_labels = {}
-
-                    remaining = max(0, total_target - memory_hits - fuzzy_hits)
-                    st.info(
-                        f"Recompute (dry-run): target rows = {total_target} • "
-                        f"memory matches = {memory_hits} • fuzzy matches = {fuzzy_hits} • remaining = {remaining}"
-                    )
-
-                    if st.button("Apply suggestions"):
-                        df_tx_apply = df_tx_prev.copy()
-                        assigned_now = df_tx_apply["AssignedCategory"].astype(str).fillna("").str.strip()
-                        mask_tgt_apply = pd.Series(True, index=df_tx_apply.index) if overwrite_filled else assigned_now.isin(["", "Uncategorized"])
-
-                        mk_apply = df_tx_apply["Merchant"].astype(str) \
-                                    .str.lower() \
-                                    .str.replace("/", " ", regex=False) \
-                                    .str.replace(r"\s+", " ", regex=True) \
                                     .str.strip()
-                        proposed_mem_apply = mk_apply.map(mem_map).fillna("")
-                        mem_fill_apply = mask_tgt_apply & proposed_mem_apply.ne("")
-                        mem_fill_apply_count = int(mem_fill_apply.sum())
-                        df_tx_apply.loc[mem_fill_apply, "AssignedCategory"] = proposed_mem_apply[mem_fill_apply]
+                                )
+                                base_mem["AssignedCategory"] = base_mem["AssignedCategory"].astype(str).str.strip()
+                                base_mem = base_mem[(base_mem["MerchantKey"] != "") & (base_mem["AssignedCategory"] != "")]
+                                base_mem = base_mem.drop_duplicates(subset=["MerchantKey"], keep="last")
+                                merged = pd.concat([base_mem, df_mem], ignore_index=True)
 
-                        still_empty_apply = mask_tgt_apply & df_tx_apply["AssignedCategory"].astype(str).fillna("").str.strip().eq("")
-                        applied_fuzzy = 0
-                        if int(still_empty_apply.sum()) > 0:
-                            joined_text_apply = (
-                                df_tx_apply["Description"].fillna("").astype(str) + " " +
-                                df_tx_apply["Merchant"].fillna("").astype(str)
+                            merged = merged.dropna().drop_duplicates(subset=["MerchantKey"], keep="last")
+                            write_merchants(ws_id, merged)
+                    except Exception as e:
+                        print(f"[MEM-WRITE-ERR] {e}")
+
+                    st.session_state["tx_staged"] = df_tx_form
+                    st.session_state["ws_tx_df"] = df_tx_form.copy()  # keep Overview current
+                    st.success("Transactions saved to workspace.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Save failed: {e}")
+
+            c2, c3 = st.columns([1,1])
+            with c2:
+                if st.button("Clear staged transactions"):
+                    st.session_state.pop("tx_staged", None)
+                    st.session_state.pop("tx_universe", None)
+                    st.session_state["ws_tx_df"] = pd.DataFrame()  # keep Overview current
+                    st.info("Cleared staged transactions.")
+                    st.rerun()
+
+            with c3:
+                overwrite_filled = st.checkbox(
+                    "Overwrite filled",
+                    value=False,
+                    help="If checked, memory + fuzzy will recompute for all rows. If off, only empty AssignedCategory cells are filled."
+                )
+                try:
+                    df_tx_prev = st.session_state.get("tx_staged", pd.DataFrame()).copy()
+                    universe = st.session_state.get("tx_universe", [])
+                    if df_tx_prev.empty or not universe:
+                        st.info("No staged transactions or Category Universe to compute against.")
+                    else:
+                        if "AssignedCategory" not in df_tx_prev.columns:
+                            df_tx_prev["AssignedCategory"] = ""
+                        cur_assigned = df_tx_prev["AssignedCategory"].astype(str).fillna("").str.strip()
+                        mask_target = pd.Series(True, index=df_tx_prev.index) if overwrite_filled else cur_assigned.isin(["","Uncategorized"])
+                        total_target = int(mask_target.sum())
+
+                        if ws_id:
+                            try:
+                                df_mem_prev = read_merchants(ws_id)
+                            except Exception:
+                                df_mem_prev = pd.DataFrame(columns=["MerchantKey","AssignedCategory"])
+                        else:
+                            df_mem_prev = pd.DataFrame(columns=["MerchantKey","AssignedCategory"])
+
+                        mem_map = {}
+                        if not df_mem_prev.empty:
+                            mem_map = (
+                                df_mem_prev.dropna()
+                                .assign(
+                                    MerchantKey=lambda d: d["MerchantKey"].astype(str)
+                                        .str.lower()
+                                        .str.replace("/", " ", regex=False)
+                                        .str.replace(r"\s+", " ", regex=True)
+                                        .str.strip(),
+                                    AssignedCategory=lambda d: d["AssignedCategory"].astype(str).str.strip()
+                                )
+                                .drop_duplicates(subset=["MerchantKey"], keep="last")
+                                .set_index("MerchantKey")["AssignedCategory"]
+                                .to_dict()
+                            )
+
+                        local_pairs = df_tx_prev[["Merchant", "AssignedCategory"]].copy()
+                        local_pairs["AssignedCategory"] = local_pairs["AssignedCategory"].astype(str).str.strip()
+                        local_pairs = local_pairs[(local_pairs["AssignedCategory"] != "") & (local_pairs["AssignedCategory"].str.lower() != "uncategorized")]
+                        local_pairs["MerchantKey"] = (
+                            local_pairs["Merchant"].astype(str)
+                            .str.lower()
+                            .str.replace("/", " ", regex=False)
+                            .str.replace(r"\s+", " ", regex=True)
+                            .str.strip()
+                        )
+                        local_pairs = local_pairs[local_pairs["MerchantKey"] != ""]
+                        local_map = (
+                            local_pairs.drop_duplicates(subset=["MerchantKey"], keep="last")
+                            .set_index("MerchantKey")["AssignedCategory"].to_dict()
+                        )
+                        if local_map:
+                            mem_map.update(local_map)
+
+                        mk = df_tx_prev["Merchant"].astype(str) \
+                                .str.lower() \
+                                .str.replace("/", " ", regex=False) \
+                                .str.replace(r"\s+", " ", regex=True) \
+                                .str.strip()
+                        proposed_mem = mk.map(mem_map).fillna("")
+                        mem_fill_mask = mask_target & proposed_mem.ne("")
+                        memory_hits = int(mem_fill_mask.sum())
+
+                        after_mem_assigned = cur_assigned.where(~mem_fill_mask, proposed_mem)
+
+                        fuzzy_hits = 0
+                        unmatched_mask = mask_target & after_mem_assigned.eq("")
+                        if int(unmatched_mask.sum()) > 0:
+                            joined_text_prev = (
+                                df_tx_prev["Description"].fillna("").astype(str) + " " +
+                                df_tx_prev["Merchant"].fillna("").astype(str)
                             ).str.lower().str.replace("/", " ", regex=False).str.replace(r"\s+", " ", regex=True).str.strip()
 
-                            for idx in still_empty_apply[still_empty_apply].index.tolist():
+                            idxs = unmatched_mask[unmatched_mask].index.tolist()
+                            fuzzy_labels = {}
+                            for idx in idxs:
                                 label, score = _suggest_category_universe_with_score(
-                                    joined_text_apply.loc[idx], universe, cutoff=60
+                                    joined_text_prev.loc[idx], universe, cutoff=60
                                 )
                                 if label:
-                                    df_tx_apply.at[idx, "AssignedCategory"] = label
-                                    applied_fuzzy += 1
+                                    fuzzy_labels[idx] = label
+                            fuzzy_hits = len(fuzzy_labels)
+                        else:
+                            fuzzy_labels = {}
 
-                        st.session_state["tx_staged"] = df_tx_apply
-                        st.session_state["ws_tx_df"] = df_tx_apply.copy()  # keep Overview current
-                        st.success(f"Suggestions recomputed (memory {mem_fill_apply_count}, fuzzy {applied_fuzzy}).")
-                        st.rerun()
+                        remaining = max(0, total_target - memory_hits - fuzzy_hits)
+                        st.info(
+                            f"Recompute (dry-run): target rows = {total_target} • "
+                            f"memory matches = {memory_hits} • fuzzy matches = {fuzzy_hits} • remaining = {remaining}"
+                        )
 
-            except Exception as e:
-                st.error(f"Preview/apply failed: {e}")
+                        if st.button("Apply suggestions"):
+                            df_tx_apply = df_tx_prev.copy()
+                            assigned_now = df_tx_apply["AssignedCategory"].astype(str).fillna("").str.strip()
+                            mask_tgt_apply = pd.Series(True, index=df_tx_apply.index) if overwrite_filled else assigned_now.isin(["", "Uncategorized"])
+
+                            mk_apply = df_tx_apply["Merchant"].astype(str) \
+                                        .str.lower() \
+                                        .str.replace("/", " ", regex=False) \
+                                        .str.replace(r"\s+", " ", regex=True) \
+                                        .str.strip()
+                            proposed_mem_apply = mk_apply.map(mem_map).fillna("")
+                            mem_fill_apply = mask_tgt_apply & proposed_mem_apply.ne("")
+                            mem_fill_apply_count = int(mem_fill_apply.sum())
+                            df_tx_apply.loc[mem_fill_apply, "AssignedCategory"] = proposed_mem_apply[mem_fill_apply]
+
+                            still_empty_apply = mask_tgt_apply & df_tx_apply["AssignedCategory"].astype(str).fillna("").str.strip().eq("")
+                            applied_fuzzy = 0
+                            if int(still_empty_apply.sum()) > 0:
+                                joined_text_apply = (
+                                    df_tx_apply["Description"].fillna("").astype(str) + " " +
+                                    df_tx_apply["Merchant"].fillna("").astype(str)
+                                ).str.lower().str.replace("/", " ", regex=False).str.replace(r"\s+", " ", regex=True).str.strip()
+
+                                for idx in still_empty_apply[still_empty_apply].index.tolist():
+                                    label, score = _suggest_category_universe_with_score(
+                                        joined_text_apply.loc[idx], universe, cutoff=60
+                                    )
+                                    if label:
+                                        df_tx_apply.at[idx, "AssignedCategory"] = label
+                                        applied_fuzzy += 1
+
+                            st.session_state["tx_staged"] = df_tx_apply
+                            st.session_state["ws_tx_df"] = df_tx_apply.copy()  # keep Overview current
+                            st.success(f"Suggestions recomputed (memory {mem_fill_apply_count}, fuzzy {applied_fuzzy}).")
+                            st.rerun()
+
+                except Exception as e:
+                    st.error(f"Preview/apply failed: {e}")
 
     # =========================
     # Actuals (Transactions) Sankey — Expense -> AssignedCategory -> Merchant
