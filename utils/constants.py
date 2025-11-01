@@ -1,10 +1,10 @@
 # utils/constants.py
 
 SAMPLE_CSV = """Category,Bank Account,Subcategory,Amount,Income
-Food & Groceries,Utilities,Bank3,100,Income 1
-Food & Groceries,Travel,Bank1,100,Income 1
-Travel,Saving 4,Bank2,100,Income 2
-Housing,Saving 5,Bank2,100,Income 2
+Food & Groceries,Bank3,Utilities,100,Income 1
+Food & Groceries,Bank1,Travel,100,Income 1
+Travel,Bank2,train,100,Income 2
+Housing,Bank2,internet,100,Income 2
 """
 
 DEFAULT_HEADERS = ["Category", "Bank Account", "Subcategory", "Amount","Income"]
