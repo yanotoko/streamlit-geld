@@ -288,6 +288,17 @@ if ws_id:
         ws_loaded, ws_empty = True, df_ws.dropna(how="all").shape[0] == 0
         st.session_state["ws_version"] = int(meta.get("version", 0))
 
+        # right after reading df_ws/meta
+        incoming = df_ws.copy()
+        current = st.session_state.get("ws_budget_df")
+        switched = st.session_state.get("_loaded_workspace_id") != ws_id
+        incoming_has_rows = not incoming.empty
+        current_empty = current is None or current.empty
+
+        if switched or incoming_has_rows or current_empty:
+            st.session_state["ws_budget_df"] = incoming
+
+        st.session_state["_loaded_workspace_id"] = ws_id
         # ---------- NEW: snapshot everything for Overview ----------
         st.session_state["ws_budget_df"] = df_ws.copy()
 
@@ -608,6 +619,9 @@ with tab_setup:
         if not st.session_state.get("guide_active", False):
             st.session_state["guide_rows"].clear()
 
+    if st.session_state.pop("__guide_reset_toggle", False):
+        st.session_state["guide_active"] = False
+
     cols_head = st.columns([1, 1, 1, 2])
     with cols_head[0]:
         st.toggle(
@@ -850,7 +864,7 @@ with tab_setup:
         
                     # clear staged and refresh UI
                     st.session_state["guide_rows"] = []
-                    #st.session_state["guide_active"] = False
+                    st.session_state["__guide_reset_toggle"] = True
                     st.success("Inserted staged rows into the budget table.")
                     _rerun()
 
