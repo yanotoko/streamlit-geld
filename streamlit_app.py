@@ -1970,7 +1970,7 @@ with tab_overview:
                 f"Using account column: {budget_acct_col}</span>",
                 unsafe_allow_html=True
             )
-            cpa1, cpa2 = st.columns([1, 1])
+            cpa1, cpa2, cpa3 = st.columns([1, 1, 1])
             with cpa1:
                 normalize_for_routing = st.checkbox(
                     "Normalize budget to monthly for routing",
@@ -1979,15 +1979,31 @@ with tab_overview:
                 )
             with cpa2:
                 hide_zero_payments = st.checkbox("Hide zero-amount accounts", value=True)
+            with cpa3:
+                split_by_tx_account = st.checkbox(
+                    "Split by transaction account",
+                    value=False,
+                    help="Show how each transactions Account contributes to the routed payment amount."
+                )
 
             df_period_safe = locals().get("df_period", pd.DataFrame(columns=["AssignedCategory", "Amount"]))
+            tx_account_available = "Account" in df_period_safe.columns
+            if split_by_tx_account and not tx_account_available:
+                st.info("Transactions do not include an Account column, so splitting by transaction account is disabled.")
+                split_by_tx_account = False
+            actuals_group_cols = ["AssignedCategory"]
+            if split_by_tx_account:
+                actuals_group_cols.append("Account")
             actuals_cat = (
                 df_period_safe.copy()
                 .assign(Amount=lambda d: pd.to_numeric(d.get("Amount", pd.Series(dtype=float)), errors="coerce").fillna(0))
-                .groupby("AssignedCategory", as_index=False)["Amount"]
+                .groupby(actuals_group_cols, as_index=False)["Amount"]
                 .sum()
-                .rename(columns={"AssignedCategory": "Category", "Amount": "Actuals"})
             )
+            rename_map = {"AssignedCategory": "Category", "Amount": "Actuals"}
+            if split_by_tx_account:
+                rename_map["Account"] = "TxnAccount"
+            actuals_cat = actuals_cat.rename(columns=rename_map)
 
             budget_map_base = budget_df.copy()
             budget_map_base["_val"] = pd.to_numeric(budget_map_base[val_col], errors="coerce").fillna(0)
@@ -2027,13 +2043,17 @@ with tab_overview:
                 else:
                     pair_sorted = pair.sort_values(["__CAT__", "BudgetValue"], ascending=[True, False])
                     dominant = pair_sorted.drop_duplicates(subset=["__CAT__"], keep="first")[["__CAT__", "__ACCT__"]]
-                    dominant = dominant.rename(columns={"__CAT__": "Category", "__ACCT__": "Account"})
+                    dominant = dominant.rename(columns={"__CAT__": "Category", "__ACCT__": "BudgetAccount"})
 
                     routed = actuals_cat.merge(dominant, on="Category", how="left")
-                    routed["Account"] = routed["Account"].fillna("Unmapped")
+                    routed["BudgetAccount"] = routed["BudgetAccount"].fillna("Unmapped")
+
+                    group_cols = ["BudgetAccount"]
+                    if split_by_tx_account:
+                        group_cols.append("TxnAccount")
 
                     payments = (
-                        routed.groupby("Account", as_index=False)["Actuals"]
+                        routed.groupby(group_cols, as_index=False)["Actuals"]
                         .sum()
                         .rename(columns={"Actuals": "To Pay"})
                     )
@@ -2041,15 +2061,26 @@ with tab_overview:
                         payments = payments[payments["To Pay"] != 0]
 
                     if not payments.empty:
-                        payments = payments.sort_values("To Pay", ascending=False)
+                        if split_by_tx_account:
+                            payments = payments.sort_values(["BudgetAccount", "To Pay"], ascending=[True, False])
+                        else:
+                            payments = payments.sort_values("To Pay", ascending=False)
 
-                    st.dataframe(payments, use_container_width=True)
+                    display_payments = payments.rename(columns={"BudgetAccount": "Payment Account"})
+                    if split_by_tx_account:
+                        display_payments = display_payments.rename(columns={"TxnAccount": "Transactions Account"})
+                    st.dataframe(display_payments, use_container_width=True)
 
                     with st.expander("See routing details (Category → Account → Actuals)", expanded=False):
-                        detail = routed.rename(columns={"Actuals": "Amount"})
+                        detail = routed.rename(columns={"Actuals": "Amount", "BudgetAccount": "Payment Account"})
+                        if split_by_tx_account:
+                            detail = detail.rename(columns={"TxnAccount": "Transactions Account"})
                         if hide_zero_payments:
                             detail = detail[detail["Amount"] != 0]
-                        detail = detail.sort_values(["Account", "Amount"], ascending=[True, False])
+                        sort_cols = ["Payment Account", "Amount"]
+                        if split_by_tx_account:
+                            sort_cols = ["Payment Account", "Transactions Account", "Amount"]
+                        detail = detail.sort_values(sort_cols, ascending=[True] * (len(sort_cols) - 1) + [False])
                         st.dataframe(detail, use_container_width=True)
 
                     dl = payments.to_csv(index=False).encode("utf-8")
