@@ -163,6 +163,110 @@ def _rerun():
     except AttributeError:
         st.experimental_rerun()
 
+
+def _truncate_text(text: str, limit: int = 4000) -> str:
+    """Keep prompts compact so we don't exceed model limits."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]..."
+
+
+def _preview_table_for_llm(df: pd.DataFrame | None, label: str, max_rows: int = 25) -> str:
+    """Return a short CSV-style preview for the assistant."""
+    if df is None or df.empty:
+        return f"{label}: no data available."
+
+    preview = df.head(max_rows).copy()
+    num_cols = preview.select_dtypes(include=["number"]).columns
+    preview[num_cols] = preview[num_cols].round(2)
+
+    csv_blob = preview.to_csv(index=False)
+    return _truncate_text(
+        f"{label} (showing up to {min(len(preview), max_rows)} of {len(df)} rows):\n{csv_blob}"
+    )
+
+
+def _build_budget_assistant_context(
+    budget_df: pd.DataFrame | None,
+    tx_df: pd.DataFrame | None,
+    val_col: str | None,
+    max_rows: int = 200,
+) -> str:
+    """Combine budget + transactions previews plus simple aggregates for the LLM."""
+    parts: list[str] = []
+
+    if budget_df is not None and not budget_df.empty:
+        if val_col and val_col in budget_df.columns:
+            total_budget = pd.to_numeric(budget_df[val_col], errors="coerce").fillna(0).sum()
+            parts.append(f"Budget total ({val_col} sum): {total_budget:,.2f}")
+        parts.append(_preview_table_for_llm(budget_df, "Budget table", max_rows))
+    else:
+        parts.append("Budget table: no rows available.")
+
+    if tx_df is not None and not tx_df.empty:
+        candidate_amount_cols = ["Amount", "amount", val_col]
+        tx_amount_col = next((c for c in candidate_amount_cols if c and c in tx_df.columns), None)
+        if tx_amount_col:
+            total_tx = pd.to_numeric(tx_df[tx_amount_col], errors="coerce").fillna(0).sum()
+            parts.append(f"Transactions total ({tx_amount_col} sum): {total_tx:,.2f}")
+        parts.append(_preview_table_for_llm(tx_df, "Transactions table", max_rows))
+    else:
+        parts.append("Transactions table: no rows available.")
+
+    return "\n\n".join(parts)
+
+
+def _call_budget_assistant(
+    api_key: str,
+    question: str,
+    budget_df: pd.DataFrame | None,
+    tx_df: pd.DataFrame | None,
+    val_col: str | None,
+    model_name: str = "gpt-4o-mini",
+) -> str:
+    """Send the user's question plus context to the selected LLM."""
+    if not api_key:
+        raise ValueError("Missing API key for the budget assistant.")
+    if not question.strip():
+        raise ValueError("Question is empty.")
+
+    context_blob = _build_budget_assistant_context(budget_df, tx_df, val_col)
+
+    try:
+        from openai import OpenAI  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "The 'openai' package is required to use the budget assistant. "
+            "Add it to requirements.txt and reinstall dependencies."
+        ) from exc
+
+    client = OpenAI(api_key=api_key)
+    system_prompt = (
+        "You are an expert budgeting assistant. "
+        "Use the provided budget and transaction context to answer questions with concrete numbers. "
+        "If the answer is not in the context, say so."
+    )
+    payload = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": f"Budget & transaction context:\n{context_blob}\n\nQuestion:\n{question.strip()}",
+        },
+    ]
+
+    completion = client.chat.completions.create(
+        model=model_name,
+        messages=payload,
+        temperature=0.2,
+    )
+
+    if not completion.choices:
+        raise RuntimeError("Assistant returned no choices.")
+
+    answer = completion.choices[0].message.content
+    return (answer or "").strip()
+
 st.set_page_config(page_title="Budget App", layout="wide")
 st.title("💰 Budget App")
 # =============== UI Helpers (icons, headers, spacing) + Theme ===============
@@ -401,6 +505,9 @@ st.session_state.setdefault("ws_lookup_df", pd.DataFrame(columns=LOOKUP_HEADERS)
 # Guide toggle default
 st.session_state.setdefault("guide_active", False)
 st.session_state.setdefault("__editor_rev", 0)
+st.session_state.setdefault("assistant_api_key_value", "")
+st.session_state.setdefault("assistant_chat_history", [])
+st.session_state.setdefault("assistant_model_name", "gpt-4o-mini")
 
 # ---------------------------------------------------------------------------
 
@@ -1023,8 +1130,10 @@ with tab_setup:
             if tx_file is not None:
                 try:
                     df_preview = read_table_any(tx_file)
+                    st.session_state["tx_preview_df"] = df_preview.copy()
                     tx_cols = list(df_preview.columns)
                 except Exception:
+                    st.session_state["tx_preview_df"] = None
                     tx_cols = []
 
                 def _pick(lbl, candidates):
@@ -1042,6 +1151,22 @@ with tab_setup:
                 tx_map["Merchant"] = None if tx_map["Merchant"] == "(none)" else tx_map["Merchant"]
                 tx_map["Account"] = st.selectbox("Account", tx_cols, index=tx_cols.index(_pick("Account", ["Account","Card","Account Name"])) if tx_cols else 0)
                 tx_map["Amount"] = st.selectbox("Amount", tx_cols, index=tx_cols.index(_pick("Amount", ["Amount","Value","Debit","Credit"])) if tx_cols else 0)
+                period_col_options = ["(none)"] + tx_cols if tx_cols else ["(none)"]
+                guessed_period_col = None
+                for cand in ["Period", "Month", "Statement Month", "StatementMonth", "Cycle", "Billing Period"]:
+                    if cand in tx_cols:
+                        guessed_period_col = cand
+                        break
+                period_col_idx = period_col_options.index(guessed_period_col) if guessed_period_col else 0
+                period_column = st.selectbox(
+                    "Column to use for Period (optional)",
+                    options=period_col_options,
+                    index=period_col_idx,
+                    key="tx_period_column_select",
+                    help="Choose this if your file already has a month/period column per transaction."
+                )
+                tx_map["PeriodColumn"] = None if period_column in (None, "(none)") else period_column
+                use_period_column = tx_map["PeriodColumn"] is not None
 
                 # Period selector (majority month)
                 if tx_cols:
@@ -1074,13 +1199,31 @@ with tab_setup:
                     period_suggest = pd.Timestamp.today().to_period("M").strftime("%Y-%m")
                     period_options = [period_suggest]
 
+                base_period_options = period_options or [period_suggest]
+                if period_suggest not in base_period_options:
+                    base_period_options = sorted(set(base_period_options + [period_suggest]))
+                period_pick_options = [None] + base_period_options
+                default_period_choice = period_suggest if period_suggest in base_period_options else base_period_options[0]
+
+                if "tx_period_manual_last" not in st.session_state:
+                    st.session_state["tx_period_manual_last"] = default_period_choice
+                if "tx_period_select" not in st.session_state or st.session_state["tx_period_select"] not in period_pick_options:
+                    st.session_state["tx_period_select"] = default_period_choice
+                if use_period_column:
+                    st.session_state["tx_period_select"] = None
+                elif st.session_state.get("tx_period_select") is None:
+                    st.session_state["tx_period_select"] = st.session_state.get("tx_period_manual_last", default_period_choice)
+
                 selected_period = st.selectbox(
                     "Period for this upload (YYYY-MM)",
-                    options=period_options or [period_suggest],
-                    index=(period_options.index(period_suggest) if period_suggest in period_options else 0),
+                    options=period_pick_options,
                     key="tx_period_select",
-                    help="We suggest the calendar month (YYYY-MM) that appears most often in the file’s dates. You can override it."
+                    format_func=lambda opt: "Use column mapping" if opt is None else opt,
+                    disabled=use_period_column,
+                    help="We suggest the calendar month (YYYY-MM) that appears most often in the file’s dates. You can override it unless a period column is mapped."
                 )
+                if not use_period_column and selected_period is not None:
+                    st.session_state["tx_period_manual_last"] = selected_period
 
                 if st.button("Parse & stage transactions", type="primary"):
                     try:
@@ -1089,13 +1232,34 @@ with tab_setup:
                         if "Notes" not in df_tx.columns:
                             df_tx["Notes"] = ""
 
-                        sel_period = st.session_state.get("tx_period_select")
-                        if not sel_period:
-                            dt_tx = pd.to_datetime(df_tx["Date"], errors="coerce")
-                            ym_tx = dt_tx.dt.to_period("M").astype(str)
-                            counts_tx = ym_tx.value_counts()
-                            sel_period = counts_tx.idxmax() if not counts_tx.empty else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
-                        df_tx["Period"] = str(sel_period)
+                        period_column = tx_map.get("PeriodColumn")
+                        df_source_full = st.session_state.get("tx_preview_df")
+                        if df_source_full is None or (len(df_source_full) != len(df_tx)):
+                            try:
+                                if hasattr(tx_file, "seek"):
+                                    tx_file.seek(0)
+                                df_source_full = read_table_any(tx_file)
+                            except Exception:
+                                df_source_full = None
+                        if period_column and df_source_full is not None and period_column in df_source_full.columns:
+                            period_source = df_source_full[period_column]
+                            period_dt = pd.to_datetime(period_source, errors="coerce")
+                            if period_dt.notna().any():
+                                period_series = period_dt.dt.to_period("M").astype(str)
+                                period_series = period_series.where(period_dt.notna(), "")
+                            else:
+                                period_series = period_source.astype(str).str.strip()
+                            period_series = period_series.fillna("").astype(str).str.strip()
+                            period_series = period_series.mask(period_series.str.lower().isin(["nat", "nan"]), "")
+                            df_tx["Period"] = period_series
+                        else:
+                            sel_period = st.session_state.get("tx_period_select")
+                            if not sel_period:
+                                dt_tx = pd.to_datetime(df_tx["Date"], errors="coerce")
+                                ym_tx = dt_tx.dt.to_period("M").astype(str)
+                                counts_tx = ym_tx.value_counts()
+                                sel_period = counts_tx.idxmax() if not counts_tx.empty else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
+                            df_tx["Period"] = str(sel_period)
 
                         df_tx = _ensure_tx_id(df_tx)
 
@@ -1896,6 +2060,73 @@ with tab_overview:
                         mime="text/csv",
                         use_container_width=True
                     )
+
+    # -----------------------------------
+    # Budget Assistant (LLM)
+    # -----------------------------------
+    st.divider()
+    section_header("🤖", "Budget assistant", "Chat with an LLM that can reference your budget & transactions preview.")
+    st.caption("Only a short preview (up to 25 rows per table) is sent to the model. Provide your own OpenAI-compatible API key.")
+
+    api_key_value = st.text_input(
+        "LLM API key",
+        value=st.session_state.get("assistant_api_key_value", ""),
+        type="password",
+        placeholder="sk-...",
+        help="Your key is stored only in this browser session and used solely for answering your questions."
+    )
+    st.session_state["assistant_api_key_value"] = api_key_value
+
+    model_options = ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"]
+    default_model = st.session_state.get("assistant_model_name", model_options[0])
+    default_index = model_options.index(default_model) if default_model in model_options else 0
+    model_choice = st.selectbox(
+        "Model",
+        options=model_options,
+        index=default_index,
+        help="Choose which model to send your question to."
+    )
+    st.session_state["assistant_model_name"] = model_choice
+
+    chat_history = st.session_state.get("assistant_chat_history", [])
+    clear_col, _ = st.columns([1, 3])
+    with clear_col:
+        if st.button("Clear assistant chat", use_container_width=True, disabled=not chat_history):
+            st.session_state["assistant_chat_history"] = []
+            st.success("Assistant history cleared.")
+            st.stop()
+
+    for message in chat_history:
+        with st.chat_message(message.get("role", "user")):
+            st.markdown(message.get("content", ""))
+
+    user_prompt = st.chat_input("Ask something about your budget or transactions")
+    if user_prompt:
+        st.session_state["assistant_chat_history"].append({"role": "user", "content": user_prompt})
+        st.chat_message("user").markdown(user_prompt)
+
+        if not api_key_value.strip():
+            warning_msg = "Enter an API key before using the budget assistant."
+            st.session_state["assistant_chat_history"].append({"role": "assistant", "content": warning_msg})
+            st.chat_message("assistant").warning(warning_msg)
+        else:
+            with st.chat_message("assistant"):
+                with st.spinner("Assistant is thinking..."):
+                    try:
+                        assistant_reply = _call_budget_assistant(
+                            api_key=api_key_value.strip(),
+                            question=user_prompt,
+                            budget_df=budget_df,
+                            tx_df=tx_df,
+                            val_col=val_col,
+                            model_name=model_choice,
+                        )
+                    except Exception as exc:
+                        assistant_reply = f"Sorry, I couldn't get an answer: {exc}"
+                        st.error(assistant_reply)
+
+                st.session_state["assistant_chat_history"].append({"role": "assistant", "content": assistant_reply})
+                st.markdown(assistant_reply)
 
 with tab_settings:
     # =========================
