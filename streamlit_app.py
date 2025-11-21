@@ -2081,7 +2081,48 @@ with tab_overview:
                         if split_by_tx_account:
                             sort_cols = ["Payment Account", "Transactions Account", "Amount"]
                         detail = detail.sort_values(sort_cols, ascending=[True] * (len(sort_cols) - 1) + [False])
-                        st.dataframe(detail, use_container_width=True)
+                        detail_event = st.dataframe(
+                            detail,
+                            use_container_width=True,
+                            hide_index=True,
+                            selection_mode="single-row",
+                            on_select="rerun",
+                        )
+                        st.caption("Click a category row to preview its individual transactions below.")
+
+                        selected_category = None
+                        if detail_event is not None:
+                            event_payload = getattr(detail_event, "selection", None)
+                            if event_payload is None and isinstance(detail_event, dict):
+                                event_payload = event_payload or detail_event.get("selection")
+                            if event_payload is not None:
+                                selected_rows = getattr(event_payload, "rows", None)
+                                if selected_rows is None and isinstance(event_payload, dict):
+                                    selected_rows = event_payload.get("rows")
+                                if selected_rows:
+                                    row_idx = selected_rows[0]
+                                    if isinstance(row_idx, int) and 0 <= row_idx < len(detail):
+                                        selected_category = str(detail.iloc[row_idx].get("Category", "")).strip() or None
+
+                        if selected_category:
+                            st.markdown(f"**Transactions for `{selected_category}`**")
+                            if "AssignedCategory" not in df_period_safe.columns:
+                                st.caption("Current period data is missing AssignedCategory, so drill-down is unavailable.")
+                            else:
+                                tx_filtered = (
+                                    df_period_safe[
+                                        df_period_safe["AssignedCategory"].astype(str).str.strip() == selected_category
+                                    ]
+                                    .copy()
+                                )
+                                if tx_filtered.empty:
+                                    st.caption("No transactions found for this category in the selected period.")
+                                else:
+                                    if "Amount" in tx_filtered.columns:
+                                        tx_filtered["Amount"] = pd.to_numeric(tx_filtered["Amount"], errors="coerce").fillna(0.0)
+                                    tx_cols = [c for c in ["Date", "Description", "Merchant", "Account", "Amount"] if c in tx_filtered.columns]
+                                    tx_display = tx_filtered[tx_cols] if tx_cols else tx_filtered
+                                    st.dataframe(tx_display, use_container_width=True, hide_index=True)
 
                     dl = payments.to_csv(index=False).encode("utf-8")
                     st.download_button(
